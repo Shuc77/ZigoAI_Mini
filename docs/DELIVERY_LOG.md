@@ -827,7 +827,24 @@ errorMessage: Cannot convert argument to a ByteString because the character at i
 （`push declined due to repository rule violations`）。修正方式是改写提交（`--amend`）让密钥**从未进入历史**，
 并把文档里的所有密钥改为占位符。这条正好当作"AI 也会犯安全错误"的实例。
 
-**④ `Secure` Cookie 在 HTTP 站点上导致浏览器登录不进去（M5.1 修复）**
+**⑤ 更新流程不是原子操作，导致一次真实服务中断**
+发布 1.2 时我把更新步骤拆成了三条独立命令：`docker load` → `docker rm -f` → `docker run`。
+结果上传没完成，第一条 `load` 报 `no such file or directory`，**但第二条 `docker rm -f` 照样执行**，
+删掉了正在运行的 1.1 容器；第三条又因为本地没有 1.2 镜像、服务器连不上 Docker Hub 而失败 ——
+**线上 8080 直接无监听，服务中断**。
+
+恢复只用了 30 秒，原因只有一个：**我们从未删除旧镜像 1.1**，所以能立刻用旧版本重启。
+
+修复与加固（已写进 `docs/DEPLOY_1PANEL.md` 第 8 节）：
+1. 更新命令**用 `&&` 串成一条**：`load && rm && run`，任一步失败即中断，旧容器不会被删；
+2. **先确认产物就位**再执行破坏性动作（`ls -lh` 检查镜像包已上传）；
+3. 明确写入**回滚流程**（一条命令切回上一个 tag）与"不要 `docker rmi` 旧镜像"的纪律；
+4. 补上"上线前自检"清单：`typecheck → build → smoke → e2e`。
+
+> 这条是本次最有价值的工程教训：**部署步骤必须原子化，失败要停在破坏性动作之前**。
+> 这不是 24H 项目才需要的小心，而是滚动更新/灰度发布的基本要求 —— 我为了少打几个字拆成多步，代价是一次线上中断。
+
+**⑥ `Secure` Cookie 在 HTTP 站点上导致浏览器登录不进去**
 会话 Cookie 的安全标记原本按 `NODE_ENV === 'production'` 决定，而线上是 `http://IP:8080`（无域名无证书）。
 带 `Secure` 的 Cookie **在 HTTP 下会被浏览器直接丢弃**（localhost 例外）：登录接口返回 200，
 但浏览器不保存 → 跳转 `/customers` 时服务端看不到会话 → 又回到登录页。症状就是"点登录没反应"。

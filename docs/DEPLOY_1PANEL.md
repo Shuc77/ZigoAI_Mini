@@ -174,20 +174,55 @@ node scripts/smoke.mjs http://42.194.164.30:8080 --deepseek
 
 ## 8. 后续更新（每次改代码）
 
-```bash
-# 本机
-docker build --platform linux/amd64 -t zigoai-mini:1.1 .
-node scripts/make-deploy-bundle.mjs zigoai-mini:1.1
-scp zigoai-deploy-1.1.tar.gz root@42.194.164.30:/opt/zigoai/
+### 8.1 铁律：先确保新版就位，再停旧版
 
-# 服务器
-cd /opt/zigoai && docker load -i zigoai-deploy-1.1.tar.gz
-docker rm -f zigoai-mini
-docker run -d --name zigoai-mini --restart always --network zigoai-net \
-  -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.1
+**真实事故教训**：把更新流程拆成三条独立命令时，曾经出现
+`docker load` 失败（文件还没上传）**却仍然执行了 `docker rm -f`**，
+结果旧容器被删、新镜像又不在本地 → 服务直接中断，8080 无监听。
+
+因此更新命令**必须用 `&&` 串成一条**（失败即停），并且**先确认镜像包已上传**。
+
+```bash
+# ① 本机：构建镜像并打包（--app-only 只打包应用镜像，89MB）
+docker build --platform linux/amd64 -t zigoai-mini:1.2 .
+node scripts/make-deploy-bundle.mjs zigoai-mini:1.2 --app-only
+# 然后上传 zigoai-deploy-1.2-app.tar.gz 到 /opt/zigoai/
+
+# ② 服务器：先确认文件到位（!否则不要往下走）
+ls -lh /opt/zigoai/zigoai-deploy-1.2-app.tar.gz
+
+# ③ 一条命令完成切换：load 失败就不会删旧容器
+cd /opt/zigoai && docker load -i zigoai-deploy-1.2-app.tar.gz && docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.2
+
+# ④ 验证
+sleep 10; docker logs --tail 5 zigoai-mini; curl -s http://127.0.0.1:8080/api/health
 ```
 
-数据库数据在 `zigoai-pgdata` 卷里，重建应用容器不受影响。
+### 8.2 回滚：一条命令切回上一个版本
+
+**不要删除旧镜像**（`docker rmi`），这样任何时候都能秒级回滚：
+
+```bash
+docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.1
+```
+
+数据库数据在 `zigoai-pgdata` 卷里，重建应用容器（含回滚）都不受影响。
+**注意**：回滚只回滚应用代码；如果新版执行过数据库迁移，旧版代码需要兼容新结构（本次迁移都是向后兼容的加列操作）。
+
+### 8.3 上线前自检（本地就能拦住大部分问题）
+
+```bash
+# 1) 类型与构建
+pnpm typecheck && pnpm build
+
+# 2) Node 层：接口与业务不变量
+node scripts/smoke.mjs
+
+# 3) 浏览器层：真实交互（必须！本次连续三个 bug 都只在浏览器里复现）
+docker run -d --name zigoai-e2e-app --network zigoai-e2e-net -p 8083:3000 \
+  -e DATABASE_URL=... -e DEEPSEEK_API_KEY=... -e SESSION_SECRET=... zigoai-mini:1.2
+node scripts/e2e-browser.mjs http://127.0.0.1:8083
+```
 
 ---
 
