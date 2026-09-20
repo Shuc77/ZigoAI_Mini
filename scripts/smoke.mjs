@@ -51,8 +51,9 @@ async function login(email) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password: PASSWORD }),
   });
-  const cookie = response.headers.get('set-cookie')?.split(';')[0] ?? '';
-  return { status: response.status, cookie, body: await response.json().catch(() => null) };
+  const rawCookie = response.headers.get('set-cookie') ?? '';
+  const cookie = rawCookie.split(';')[0] ?? '';
+  return { status: response.status, cookie, rawCookie, body: await response.json().catch(() => null) };
 }
 
 async function getCustomersPage(cookie) {
@@ -107,6 +108,23 @@ console.log('\n认证');
   else fail('错误密码未被拒绝', `HTTP ${wrongPassword.status}`);
   if (bad.status === 200 && bad.cookie) ok('正确密码可登录', bad.body?.user?.tenant);
   else fail('正确密码登录失败', `HTTP ${bad.status}`);
+
+  /*
+   * 会话 Cookie 的 Secure 标记必须与访问协议匹配。
+   * 为什么值得单独断言：带 Secure 的 Cookie 在 HTTP 下会被**浏览器直接丢弃**，
+   * 症状是"点登录没反应、一直回到登录页"，而接口依然返回 200；
+   * 用 Node 写的测试不在乎 Secure 标记，所以这个小坑只能靠显式断言兜住。
+   */
+  const isHttps = baseUrl.startsWith('https://');
+  const hasSecureFlag = /;\s*Secure/i.test(bad.rawCookie);
+  if (isHttps === hasSecureFlag) {
+    ok('会话 Cookie 的 Secure 标记与协议匹配', isHttps ? 'HTTPS + Secure' : 'HTTP 不带 Secure（浏览器才会保存）');
+  } else {
+    fail(
+      '会话 Cookie 的 Secure 标记与协议不匹配',
+      isHttps ? 'HTTPS 站点缺少 Secure' : 'HTTP 站点带了 Secure，浏览器会丢弃该 Cookie，导致"登录后仍停在登录页"',
+    );
+  }
 }
 
 {

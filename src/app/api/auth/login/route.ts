@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { createSessionToken, writeSessionCookie } from '@/lib/auth/session';
+import { createSessionToken, isSecureRequest, writeSessionCookie } from '@/lib/auth/session';
 import { verifyPassword } from '@/lib/auth/password';
 import { prisma } from '@/lib/db';
 import { HttpError } from '@/lib/errors';
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
       tenantName: user.tenant.name,
       tenantSlug: user.tenant.slug,
     });
-    await writeSessionCookie(token);
+    await writeSessionCookie(token, { secure: isSecureRequest(request) });
 
     return NextResponse.json({
       ok: true,

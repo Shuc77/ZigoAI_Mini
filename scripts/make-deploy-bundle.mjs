@@ -15,16 +15,21 @@ import { createReadStream, createWriteStream, statSync, unlinkSync } from 'node:
 import { pipeline } from 'node:stream/promises';
 import { createGzip } from 'node:zlib';
 
-const appImage = process.argv[2] ?? 'zigoai-mini:1.0';
+const args = process.argv.slice(2);
+const appOnly = args.includes('--app-only');
+const appImage = args.find((a) => !a.startsWith('--')) ?? 'zigoai-mini:1.0';
 const dbImage = process.env.POSTGRES_IMAGE ?? 'postgres:16';
 const version = appImage.includes(':') ? appImage.split(':')[1] : 'latest';
-const tarPath = `zigoai-deploy-${version}.tar`;
+const tarPath = `zigoai-deploy-${version}${appOnly ? '-app' : ''}.tar`;
 const gzPath = `${tarPath}.gz`;
 
 const mb = (path) => `${(statSync(path).size / 1024 / 1024).toFixed(1)} MB`;
 
-console.log(`[bundle] 导出镜像：${appImage} + ${dbImage}`);
-execFileSync('docker', ['save', appImage, dbImage, '-o', tarPath], { stdio: 'inherit' });
+// --app-only：只打包应用镜像，用于日常更新（数据库镜像服务器上已经有了，不必重复传 150MB）
+const images = appOnly ? [appImage] : [appImage, dbImage];
+
+console.log(`[bundle] 导出镜像：${images.join(' + ')}`);
+execFileSync('docker', ['save', ...images, '-o', tarPath], { stdio: 'inherit' });
 console.log(`[bundle] 原始大小 ${mb(tarPath)}，正在压缩…`);
 
 await pipeline(createReadStream(tarPath), createGzip({ level: 6 }), createWriteStream(gzPath));
@@ -32,5 +37,7 @@ unlinkSync(tarPath);
 
 console.log(`[bundle] 完成：${gzPath}（${mb(gzPath)}）`);
 console.log('');
-console.log('下一步（在本机执行，把包传到服务器）：');
-console.log(`  scp ${gzPath} root@42.194.164.30:/opt/zigoai/`);
+console.log('下一步：把包上传到服务器 /opt/zigoai/，然后执行');
+console.log(`  docker load -i /opt/zigoai/${gzPath}`);
+console.log(`  docker rm -f zigoai-mini`);
+console.log(`  docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env ${appImage}`);

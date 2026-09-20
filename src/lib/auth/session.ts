@@ -66,20 +66,57 @@ export async function readSession(): Promise<AuthContext | null> {
   }
 }
 
-export async function writeSessionCookie(token: string): Promise<void> {
+export async function writeSessionCookie(
+  token: string,
+  options: { secure: boolean },
+): Promise<void> {
   const store = await cookies();
   store.set(COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    secure: options.secure,
     path: '/',
     maxAge: MAX_AGE_SECONDS,
   });
 }
 
-export async function clearSessionCookie(): Promise<void> {
+export async function clearSessionCookie(options: { secure: boolean }): Promise<void> {
   const store = await cookies();
-  store.set(COOKIE_NAME, '', { httpOnly: true, path: '/', maxAge: 0 });
+  store.set(COOKIE_NAME, '', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: options.secure,
+    path: '/',
+    maxAge: 0,
+  });
+}
+
+/**
+ * 判断当前请求是否走 HTTPS —— 决定 Cookie 是否加 `Secure` 标记。
+ *
+ * 为什么不能用 `NODE_ENV === 'production'`（这是上线时踩的真实 bug）：
+ * 本次部署是 `http://IP:8080`（无域名、无证书），而带 `Secure` 的 Cookie 在 HTTP 下
+ * 会被浏览器**直接丢弃**（localhost 例外）。症状是"点登录没反应 / 一直回到登录页"，
+ * 而接口本身返回 200 —— 尤其阴险的是：用 Node 写的冒烟脚本不在乎 Secure 标记，
+ * 所以自动化测试全绿，只有真实浏览器才复现。
+ *
+ * 策略：优先读显式配置 `COOKIE_SECURE`，否则按请求协议自动判断（支持反代透传的 x-forwarded-proto）。
+ */
+export function isSecureRequest(request: Request): boolean {
+  const override = process.env.COOKIE_SECURE;
+  if (override === 'true') return true;
+  if (override === 'false') return false;
+
+  const forwardedProto = request.headers.get('x-forwarded-proto');
+  if (forwardedProto) {
+    return forwardedProto.split(',')[0]?.trim().toLowerCase() === 'https';
+  }
+
+  try {
+    return new URL(request.url).protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 export const SESSION_COOKIE_NAME = COOKIE_NAME;
