@@ -31,14 +31,23 @@
 
 部署包在**你本机**：`D:\Desktop\ZigoAI\zigoai-deploy-1.0.tar.gz`（241 MB，含应用镜像 + Postgres 镜像）。
 
-在**你自己的 PowerShell** 里执行（不是 1Panel 终端；会提示输入服务器密码）：
+### 方式 A（推荐，不需要服务器 SSH 密码）：用 1Panel 文件管理上传
+
+1. 打开 1Panel → 左侧 **文件** → 进入 `/opt` → 新建文件夹 `zigoai` → 双击进入
+2. 右上角 **上传** → 选择本机文件 `zigoai-deploy-1.0.tar.gz` → 等上传完成
+3. 确认该目录下已出现 `zigoai-deploy-1.0.tar.gz`
+
+### 方式 B：本机 scp（需要服务器 SSH 密码/密钥）
+
+在**你自己的 PowerShell** 里执行：
 
 ```powershell
 ssh root@42.194.164.30 "mkdir -p /opt/zigoai"
 scp D:\Desktop\ZigoAI\zigoai-deploy-1.0.tar.gz root@42.194.164.30:/opt/zigoai/
 ```
 
-> 若服务器 SSH 用户不是 `root`，请替换；也可以用 1Panel 的「文件」功能上传到 `/opt/zigoai/`。
+> 忘记 SSH 密码：腾讯云控制台 → 实例 → 重置密码（需重启生效）；用密钥对创建的实例则要用对应的私钥文件登录。
+> **无论用哪种方式上传，后续所有命令都在 1Panel 自带的终端里执行即可。**
 
 ---
 
@@ -56,8 +65,9 @@ docker load -i zigoai-deploy-1.0.tar.gz
 # 2) 建专用网络
 docker network create zigoai-net
 
-# 3) 启动数据库（不映射任何端口到公网）
+# 3) 启动数据库（端口只绑到宿主机回环地址，公网访问不到）
 docker run -d --name zigoai-db --restart always --network zigoai-net \
+  -p 127.0.0.1:15432:5432 \
   -e POSTGRES_USER=zigoai \
   -e POSTGRES_PASSWORD=zigoai \
   -e POSTGRES_DB=zigoai \
@@ -68,6 +78,9 @@ docker run -d --name zigoai-db --restart always --network zigoai-net \
 for i in $(seq 1 30); do docker exec zigoai-db pg_isready -U zigoai && break; sleep 2; done
 # 预期：/var/run/postgresql:5432 - accepting connections
 ```
+
+> `-p 127.0.0.1:15432:5432` 的含义：只有**服务器本机**能通过 15432 访问数据库，公网与局域网都连不上。
+> 这样既能用图形化工具（见第 10 节），又不会像服务器上那个 5432 一样把数据库暴露在公网。
 
 ---
 
@@ -188,3 +201,65 @@ docker run -d --name zigoai-mini --restart always --network zigoai-net \
 | 页面 500 | `docker logs zigoai-mini` 看 `[migrate]`；必要时 `docker exec zigoai-mini node scripts/db-migrate.mjs` |
 | 登录后立刻被踢回 | `.env` 里 `SESSION_SECRET` 为空或太短 |
 | 想重置演示数据 | `curl -s -X POST -H "x-seed-token: zigoai-demo-reset" http://127.0.0.1:8080/api/admin/reset` |
+
+---
+
+## 10. 人工处理数据库（查数、核对、订正）
+
+### 10.1 最快的办法：容器内 psql（零暴露）
+
+```bash
+docker exec -it zigoai-db psql -U zigoai -d zigoai
+```
+
+常用命令：
+
+```sql
+\dt                                              -- 看所有表
+\d "CustomerState"                               -- 看某张表结构
+select name, "leadStage", intent, "needHuman", version from "CustomerState" cs
+  join "Customer" c on c.id = cs."customerId";    -- 客户漏斗一览
+select status, model, "latencyMs", "promptTokens", "completionTokens"
+  from "AiSuggestion" order by "createdAt" desc limit 20;  -- AI 调用审计
+\q                                               -- 退出
+```
+
+### 10.2 图形化工具（DBeaver / Navicat / pgAdmin）
+
+数据库端口已绑定在宿主机 `127.0.0.1:15432`，用一条 SSH 隧道即可从本机连上：
+
+```powershell
+ssh -L 15432:127.0.0.1:15432 root@42.194.164.30
+```
+
+保持该窗口不要关，然后在图形工具里新建 PostgreSQL 连接：
+
+| 字段 | 值 |
+|---|---|
+| Host | `localhost` |
+| Port | `15432` |
+| Database | `zigoai` |
+| User / Password | `zigoai` / `zigoai` |
+
+> Tomcat / Java 应用连库时，JDBC URL 同理：
+> `jdbc:postgresql://127.0.0.1:15432/zigoai`（Tomcat 在宿主机）或
+> `jdbc:postgresql://zigoai-db:5432/zigoai`（Tomcat 容器与 DB 同处 `zigoai-net` 网络），
+> 驱动用 `postgresql-42.x.jar`。不过仅为"人工处理数据"而写一个 Java 应用性价比很低，隧道 + 图形工具更快。
+
+### 10.3 ⚠️ 直接改数据的两个坑
+
+1. **改 `CustomerState` 必须同时 `version = version + 1`** —— 这是乐观锁字段，不改会让并发保护失效。
+2. **不要绕过应用直接改状态** —— 否则 `AiSuggestion` 里的"AI 建议了什么 / 人改成了什么"审计链会断。
+
+改客户状态请优先用应用提供的人工操作接口：
+
+```bash
+# 需要带上登录后的会话 Cookie
+curl -X POST -H "Content-Type: application/json" -H "Cookie: zigoai_session=<...>" \
+  -d '{"action":"RESOLVE_HUMAN"}' \
+  http://127.0.0.1:8080/api/customers/<客户id>/state
+# action 可选：RESOLVE_HUMAN / CONFIRM_WON / CONFIRM_LOST / REOPEN
+```
+
+**适合直接上 SQL 的场景**：查数据、统计（采纳率/转人工率）、建索引、临时订正文案。
+**不适合**：改销售阶段、改是否转人工、伪造 AI 判断记录。
