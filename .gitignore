@@ -1,0 +1,34 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+
+# env — 绝不提交任何密钥
+.env
+.env.*
+!.env.example
+
+# prisma generated client
+src/generated/
+
+# 本地开发用的独立 PostgreSQL 实例（数据目录 + 日志），绝不入库
+.localdb/
+
+# third-party reference code (pi agent harness), 仅本地参考，不进入提交仓库
+docs/_reference/
+
+# build & deploy artifacts
+*.tar
+*.tar.gz
+dist/
+coverage/
+
+# logs / misc
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

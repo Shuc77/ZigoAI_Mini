@@ -1,0 +1,10 @@
+# pnpm 11 的依赖构建脚本白名单。
+# 为什么需要：Prisma 的 CLI 与迁移引擎要靠 postinstall 下载本机二进制，esbuild 被 tsx / vitest 使用。
+# 这三个包是本项目唯一的例外，其余依赖一律不执行构建脚本（供应链安全默认收紧）。
+# 非交互式环境（无 TTY）下允许 pnpm 重建 node_modules
+confirmModulesPurge: false
+allowBuilds:
+  prisma: true
+  '@prisma/engines': true
+  esbuild: true
+  '@tailwindcss/oxide': true

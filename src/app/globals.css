@@ -1,0 +1,20 @@
+@import 'tailwindcss';
+
+/* 24H 项目不做设计系统，保持"普通但清晰"：浅底、白卡、单一强调色。 */
+:root {
+  color-scheme: light;
+}
+
+body {
+  background-color: #f6f7f9;
+  color: #0f172a;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+}
+
+/* 让长文本（聊天记录、AI 回复）保留换行 */
+.prewrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}

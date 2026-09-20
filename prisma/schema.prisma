@@ -1,0 +1,219 @@
+// ZigoAI Mini — 数据模型
+// 设计要点（答辩用）：
+// 1) 除 Tenant 外每张表都带 tenantId，且所有查询都必须经过仓储层注入作用域 —— 这是多租户隔离的第一性约束。
+// 2) CustomerState 与 Customer 分离：客户档案（相对静态）与销售状态（每次 AI 判断都会变）解耦，便于乐观锁与审计。
+// 3) AiSuggestion 保存原始请求/响应/耗时/token/成本 —— 让 AI 的每次判断可回放、可解释、可定位线上问题。
+// 4) Message.clientMessageId + 唯一索引 = 消息幂等的基石（同一租户内同一条消息只处理一次）。
+
+generator client {
+  // Prisma 7 的新一代 Rust-free 客户端，必须显式指定 output
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  SALES
+  MANAGER
+}
+
+enum MessageRole {
+  CUSTOMER
+  SALES
+}
+
+enum LeadStage {
+  NEW
+  DISCOVERY
+  INTERESTED
+  HIGH_INTENT
+  WON
+  LOST
+}
+
+enum SuggestionStatus {
+  SUCCESS
+  RETRY_OK
+  FALLBACK
+  ERROR
+}
+
+enum FollowUpStatus {
+  PENDING
+  SENT
+  SKIPPED
+  CANCELLED
+}
+
+/// 租户（企业）：不同企业的销售目标与规则不同，规则会进入 AI prompt
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  salesGoal String
+  /// [{ id: "R1", text: "客户未表达明确兴趣前，不主动报价", guard: "FORBID_QUOTE_BEFORE_INTEREST" }]
+  rules     Json
+  tone      String
+  /// 明确禁止的事项，例如 ["承诺具体优惠", "承诺疗效"]
+  forbidden Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  customers    Customer[]
+  messages     Message[]
+  states       CustomerState[]
+  suggestions  AiSuggestion[]
+  followUpTasks FollowUpTask[]
+}
+
+/// 用户：真实账号 + 角色（SALES 只看自己名下客户，MANAGER 看本企业全部）
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  email        String   @unique
+  name         String
+  /// scrypt 哈希，格式 scrypt$N$r$p$salt$hash
+  passwordHash String
+  role         Role
+  createdAt    DateTime @default(now())
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customers Customer[]
+  messages  Message[]
+
+  @@index([tenantId])
+}
+
+model Customer {
+  id         String   @id @default(cuid())
+  tenantId   String
+  name       String
+  /// 微信/联系人标识
+  handle     String
+  phone      String?
+  source     String?
+  note       String?
+  assigneeId String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant      Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignee    User?          @relation(fields: [assigneeId], references: [id], onDelete: SetNull)
+  messages    Message[]
+  state       CustomerState?
+  suggestions AiSuggestion[]
+  followUps   FollowUpTask[]
+
+  @@index([tenantId, assigneeId])
+  @@index([tenantId, updatedAt])
+}
+
+model Message {
+  id              String      @id @default(cuid())
+  tenantId        String
+  customerId      String
+  role            MessageRole
+  content         String
+  /// SALES 消息的发送人
+  senderUserId    String?
+  /// 同一批「一轮沟通」的消息共享 batchId（连续消息合并）
+  batchId         String?
+  /// 客户端生成的去重键，用于消息幂等
+  clientMessageId String?
+  createdAt       DateTime    @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  sender   User?    @relation(fields: [senderUserId], references: [id], onDelete: SetNull)
+
+  /// 幂等基石：同租户内同一 clientMessageId 只落库一次（NULL 在 PG 中互不冲突，销售消息可留空）
+  @@unique([tenantId, clientMessageId])
+  @@index([tenantId, customerId, createdAt])
+}
+
+/// 客户销售状态：每次 AI 判断后更新，version 做乐观锁
+model CustomerState {
+  id                    String    @id @default(cuid())
+  tenantId              String
+  customerId            String    @unique
+  leadStage             LeadStage @default(NEW)
+  intent                String    @default("待判断")
+  needHuman             Boolean   @default(false)
+  humanReason           String?
+  lastContactAt         DateTime?
+  /// 客户最后一次说话的准确时间 —— Follow-up 的判定依据
+  lastCustomerMessageAt DateTime?
+  followUpCount         Int       @default(0)
+  lastFollowUpAt        DateTime?
+  version               Int       @default(0)
+  updatedAt             DateTime  @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, leadStage])
+  @@index([tenantId, lastCustomerMessageAt])
+}
+
+/// AI 判断结果 + 调用审计（可回放）
+model AiSuggestion {
+  id             String           @id @default(cuid())
+  tenantId       String
+  customerId     String
+  batchId        String?
+  customerIntent String
+  intentDetail   String?
+  leadStage      LeadStage
+  nextAction     String
+  reply          String
+  reason         String
+  needHuman      Boolean
+  humanReason    String?
+  /// AI 自述本次判断引用了哪几条租户规则，例如 ["R1","R3"]
+  rulesApplied   Json
+  /// 规则守护发现的问题（例如"未表达兴趣却报了价"）
+  ruleViolation  String?
+  status         SuggestionStatus   @default(SUCCESS)
+  model          String
+  promptVersion  String
+  rawRequest     Json?
+  rawResponse    Json?
+  latencyMs      Int?
+  promptTokens   Int?
+  completionTokens Int?
+  estimatedCostCny Float?
+  retryCount     Int              @default(0)
+  errorMessage   String?
+  createdAt      DateTime         @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, customerId, createdAt])
+  @@index([tenantId, status, createdAt])
+}
+
+/// 跟进任务：客户静默超时后产生，复用同一条 AI pipeline 生成跟进建议
+model FollowUpTask {
+  id           String         @id @default(cuid())
+  tenantId     String
+  customerId   String
+  status       FollowUpStatus @default(PENDING)
+  dueAt        DateTime
+  reason       String
+  attempt      Int            @default(1)
+  suggestionId String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  /// 防重复跟进：同一客户同一轮次只允许一条任务
+  @@unique([tenantId, customerId, attempt])
+  @@index([tenantId, status, dueAt])
+}
