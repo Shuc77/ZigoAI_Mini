@@ -64,7 +64,72 @@ async function getCustomersPage(cookie) {
   return { status: response.status, location: response.headers.get('location'), html: await response.text() };
 }
 
+/**
+ * 发送一条客户消息，并**等待这一批的 AI 判断完成**。
+ *
+ * 为什么不能直接读 POST 的响应：引入"连续消息合并"后，发消息接口只负责入库并开启聚合窗口
+ * （等客户是否继续发言），窗口关闭后才统一判断。所以要轮询批次状态拿建议。
+ */
+async function sendAndAwaitSuggestion(cookie, customerId, content) {
+  const clientMessageId = `smoke-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const response = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ content, clientMessageId }),
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (response.status !== 201 || !body.batchId) {
+    return { status: response.status, body, suggestion: null, batchId: body.batchId ?? null };
+  }
+
+  const data = await awaitSuggestionForBatch(cookie, customerId, body.batchId);
+  return { status: response.status, body, batchId: body.batchId, ...data };
+}
+
+/** 快速连发多条客户消息（不做等待），返回各自的 batchId —— 用于验证"连续消息合并" */
+async function sendBurst(cookie, customerId, contents) {
+  const results = [];
+  for (const content of contents) {
+    const clientMessageId = `smoke-burst-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const response = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ content, clientMessageId }),
+    });
+    const body = await response.json().catch(() => ({}));
+    results.push({ status: response.status, batchId: body.batchId, content });
+  }
+  return results;
+}
+
+/** 轮询某一批次的判断结果 */
+async function awaitSuggestionForBatch(cookie, customerId, batchId, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const poll = await fetch(
+      `${baseUrl}/api/customers/${customerId}/suggestion?batchId=${encodeURIComponent(batchId)}`,
+      { headers: { cookie } },
+    );
+    if (!poll.ok) continue;
+    const data = await poll.json();
+    if (data.suggestion) return { suggestion: data.suggestion, batchMessageCount: data.batchMessageCount };
+  }
+  return { suggestion: null, batchMessageCount: null };
+}
+
 console.log(`\n[smoke] 目标：${baseUrl}${checkDeepSeek ? '（含真实 AI 调用）' : ''}\n`);
+
+// 目标不可达时给出明确提示并退出，而不是抛出一堆 undici 堆栈
+try {
+  const probe = await fetch(`${baseUrl}/api/health`, { signal: AbortSignal.timeout(8000) });
+  await probe.text();
+} catch {
+  console.error(`[smoke] 无法连接 ${baseUrl}`);
+  console.error('  本地：请先启动服务 pnpm dev，或用 docker run 起容器后传入其地址');
+  process.exit(2);
+}
 
 // --- 1. 健康检查 -----------------------------------------------------------
 console.log('健康检查');
@@ -290,21 +355,20 @@ console.log('\n核心任务 2/3 · AI 判断与 Customer State');
   } else {
     const versionBefore = target.state?.version ?? 0;
 
-    const response = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie },
-      body: JSON.stringify({
-        content: '你们太让我失望了，约好的体验课教练临时换人也不通知，我要投诉！',
-        clientMessageId: `smoke-ai-${Date.now()}`,
-      }),
-    });
-    const body = await response.json();
-    const suggestion = body.suggestion;
+    const judged = await sendAndAwaitSuggestion(
+      cookie,
+      target.id,
+      '你们太让我失望了，约好的体验课教练临时换人也不通知，我要投诉！',
+    );
+    const suggestion = judged.suggestion;
 
-    if (response.status === 201 && suggestion) {
+    if (judged.status === 201 && suggestion) {
       ok('AI 返回结构化判断', `${suggestion.customerIntent} / ${suggestion.leadStage} / ${suggestion.nextAction}`);
     } else {
-      fail('AI 未返回结构化判断', `HTTP ${response.status} ${JSON.stringify(body).slice(0, 160)}`);
+      fail(
+        'AI 未返回结构化判断',
+        judged.timeout ? '等待判断超时（聚合窗口后仍未产出建议）' : `HTTP ${judged.status}`,
+      );
     }
 
     if (suggestion) {
@@ -345,7 +409,10 @@ console.log('\n核心任务 2/3 · AI 判断与 Customer State');
         fail('投诉场景未触发人工介入', `needHuman=${suggestion.needHuman}`);
       }
 
-      const versionAfter = body.state?.after?.version ?? versionBefore;
+      // 状态版本推进：改为重新拉取客户列表读取（发消息接口不再同步返回状态）
+      const afterList = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+      const versionAfter =
+        (afterList.customers ?? []).find((c) => c.id === target.id)?.state?.version ?? versionBefore;
       if (versionAfter === versionBefore + 1) {
         ok('Customer State 版本推进', `v${versionBefore} → v${versionAfter}`);
       } else {
@@ -421,17 +488,9 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
 
     // 3.5) 核心任务 4 的关键要求：发出去的内容必须"参与下一轮 AI 判断"
     // 做法：再让客户发一条消息，然后检查这一次判断的原始请求里是否真的带上了销售刚发的那句话
-    const nextRound = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie },
-      body: JSON.stringify({
-        content: '好的，下午三点后我在。',
-        clientMessageId: `smoke-nextround-${Date.now()}`,
-      }),
-    });
-    const nextBody = await nextRound.json();
-    const rawPrompt = JSON.stringify(nextBody.suggestion?.rawRequest ?? {});
-    if (nextBody.suggestion && rawPrompt.includes(editedReply)) {
+    const nextRound = await sendAndAwaitSuggestion(cookie, customerId, '好的，下午三点后我在。');
+    const rawPrompt = JSON.stringify(nextRound.suggestion?.rawRequest ?? {});
+    if (nextRound.suggestion && rawPrompt.includes(editedReply)) {
       ok('销售消息参与下一轮 AI 判断', '已在下一轮 prompt 的历史对话中带上');
     } else {
       fail('销售消息未参与下一轮判断', '下一轮 prompt 里找不到销售刚发送的内容');
@@ -473,19 +532,13 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
     });
 
     // 7) 端到端终态保护：成交后再来客户消息，AI 不得把阶段改回去
-    const afterWon = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie },
-      body: JSON.stringify({
-        content: '算了，我再考虑考虑，先不报了。',
-        clientMessageId: `smoke-terminal-${Date.now()}`,
-      }),
-    });
-    const wonBody = await afterWon.json();
-    const stageAfter = wonBody.state?.after?.leadStage ?? wonBody.state?.before?.leadStage;
+    const terminalRound = await sendAndAwaitSuggestion(cookie, customerId, '算了，我再考虑考虑，先不报了。');
+    const stageAfter = terminalRound.suggestion?.leadStage;
 
     if (stageAfter === 'WON') {
-      const adjustments = wonBody.adjustments ?? [];
+      const adjustments = Array.isArray(terminalRound.suggestion?.stateAdjustments)
+        ? terminalRound.suggestion.stateAdjustments
+        : [];
       ok(
         '端到端终态保护生效',
         adjustments.length > 0
@@ -528,17 +581,8 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
 
   // 7.1 规则是否按租户注入 prompt（确定性断言：直接看原始请求）
   if (lemengTarget && jixieTarget) {
-    const lemengRun = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
-      body: JSON.stringify({ content: '你们平时怎么上课的？', clientMessageId: `smoke-rules-lemeng-${Date.now()}` }),
-    }).then((r) => r.json());
-
-    const jixieRun = await fetch(`${baseUrl}/api/customers/${jixieTarget.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie: jixieCookie },
-      body: JSON.stringify({ content: '你们那边设备保险怎么办的？', clientMessageId: `smoke-rules-jixie-${Date.now()}` }),
-    }).then((r) => r.json());
+    const lemengRun = await sendAndAwaitSuggestion(lemengCookie, lemengTarget.id, '你们平时怎么上课的？');
+    const jixieRun = await sendAndAwaitSuggestion(jixieCookie, jixieTarget.id, '你们那边设备保险怎么办的？');
 
     const lemengPrompt = JSON.stringify(lemengRun.suggestion?.rawRequest ?? {});
     const jixiePrompt = JSON.stringify(jixieRun.suggestion?.rawRequest ?? {});
@@ -564,49 +608,64 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
   }
 
   // 7.3 交接规则的确定性兜底：金额阈值与敏感词命中必定转人工
+  //     判据来自**已落库的审计记录** stateAdjustments（而非接口的临时返回），因此更可信
   if (lemengTarget) {
-    const overThreshold = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
-      body: JSON.stringify({ content: '年卡 6800 元能便宜点吗？', clientMessageId: `smoke-handoff-over-${Date.now()}` }),
-    }).then((r) => r.json());
-
-    const overNotes = (overThreshold.handoffNotes ?? []).join(' ');
+    const overThreshold = await sendAndAwaitSuggestion(lemengCookie, lemengTarget.id, '年卡 6800 元能便宜点吗？');
+    const overNotes = JSON.stringify(overThreshold.suggestion?.handoffNotes ?? []);
     if (overNotes.includes('阈值')) {
-      ok('金额超阈值触发交接规则', overNotes.slice(0, 60));
+      ok('金额超阈值触发交接规则', '交接说明已落库：达到企业金额阈值');
     } else {
-      fail('金额阈值未生效', JSON.stringify(overThreshold.handoffNotes ?? []));
+      fail('金额阈值未生效', overNotes.slice(0, 160));
     }
   }
 
   if (lemengTarget) {
-    const keywordHit = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
-      body: JSON.stringify({ content: '这个课我不上了，我要退费！', clientMessageId: `smoke-handoff-keyword-${Date.now()}` }),
-    }).then((r) => r.json());
-
-    const keywordNotes = (keywordHit.handoffNotes ?? []).join(' ');
+    const keywordHit = await sendAndAwaitSuggestion(lemengCookie, lemengTarget.id, '这个课我不上了，我要退费！');
+    const keywordNotes = JSON.stringify(keywordHit.suggestion?.handoffNotes ?? []);
     if (keywordNotes.includes('敏感词')) {
-      ok('命中企业敏感词触发交接规则', keywordNotes.slice(0, 60));
+      ok('命中企业敏感词触发交接规则', '交接说明已落库：命中敏感词');
     } else {
-      fail('敏感词未生效', JSON.stringify(keywordHit.handoffNotes ?? []));
+      fail('敏感词未生效', keywordNotes.slice(0, 160));
     }
   }
 
   // 7.4 交接规则是"企业级配置"：机械之家阈值更低，同样的金额在那边会转人工
   if (jixieTarget) {
-    const jixieRun = await fetch(`${baseUrl}/api/customers/${jixieTarget.id}/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', cookie: jixieCookie },
-      body: JSON.stringify({ content: '保费大概 1500 元够吗？', clientMessageId: `smoke-handoff-jixie-${Date.now()}` }),
-    }).then((r) => r.json());
-
-    const jixieNotes = (jixieRun.handoffNotes ?? []).join(' ');
+    const jixieRun = await sendAndAwaitSuggestion(jixieCookie, jixieTarget.id, '保费大概 1500 元够吗？');
+    const jixieNotes = JSON.stringify(jixieRun.suggestion?.handoffNotes ?? []);
     if (jixieNotes.includes('阈值')) {
       ok('同一金额在机械之家触发转人工', '因其阈值仅 1000 元（企业差异可见）');
     } else {
-      fail('机械之家的金额阈值未生效', JSON.stringify(jixieRun.handoffNotes ?? []));
+      fail('机械之家的金额阈值未生效', jixieNotes.slice(0, 160));
+    }
+  }
+
+  // 7.4.5 连续消息合并：客户快速连发 3 条，应当只产生 1 次判断，且提示词里包含全部 3 条
+  if (lemengTarget) {
+    const burst = await sendBurst(lemengCookie, lemengTarget.id, [
+      '你好',
+      '我想咨询一下',
+      '你们周末有课吗？',
+    ]);
+
+    const batchIds = new Set(burst.map((item) => item.batchId));
+    if (batchIds.size === 1) {
+      ok('连续消息被合并为同一批次', `3 条消息共用 batchId ${[...batchIds][0].slice(0, 8)}`);
+    } else {
+      fail('连续消息未被合并', `出现了 ${batchIds.size} 个批次`);
+    }
+
+    const judged = await awaitSuggestionForBatch(lemengCookie, lemengTarget.id, burst[0].batchId);
+    const prompt = JSON.stringify(judged.suggestion?.rawRequest ?? {});
+    const allIncluded = ['你好', '我想咨询一下', '你们周末有课吗？'].every((text) => prompt.includes(text));
+
+    if (judged.suggestion && allIncluded) {
+      ok(
+        '一次判断覆盖了合并后的全部消息',
+        `本轮 ${judged.batchMessageCount} 条消息只调用了一次 AI`,
+      );
+    } else {
+      fail('合并后的判断不完整', `包含全部消息=${allIncluded}`);
     }
   }
 

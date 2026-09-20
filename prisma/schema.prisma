@@ -180,6 +180,9 @@ model AiSuggestion {
   rulesApplied   Json
   /// 本次判断的触发来源：NEW_MESSAGE / REGENERATE / FOLLOW_UP
   trigger        String            @default("NEW_MESSAGE")
+  /// 交接规则的触发说明（例如"对话涉及金额约 6800 元，达到企业阈值 5000 元"）
+  /// 与 stateAdjustments 的区别：后者记录"系统改写了什么"，这里记录"为什么升级到人工"
+  handoffNotes   Json?
   /// 被状态机修正的地方（"AI 建议" vs "系统采纳"），供前端展示与事后审计
   stateAdjustments Json?
   /// 规则守护发现的问题（例如"未表达兴趣却报了价"）

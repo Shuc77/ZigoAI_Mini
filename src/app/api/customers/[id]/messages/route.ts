@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { runAgent } from '@/lib/agent/pipeline';
+import { resolveBatchId, scheduleBatch, sweepExpiredBatches } from '@/lib/agent/batch';
+import { env } from '@/lib/env';
 import { unauthorized } from '@/lib/errors';
 import { getApiAuth } from '@/server/auth';
 import { jsonError, readJson } from '@/server/api';
@@ -8,7 +9,7 @@ import { appendCustomerMessage, listMessages } from '@/server/repositories/messa
 import { getLatestSuggestion } from '@/server/repositories/suggestions';
 
 export const runtime = 'nodejs';
-/** AI 判断是这一步的主要耗时来源，给足超时（Vercel/Next 默认值在自托管下也受此约束） */
+/** AI 判断是这一步的主要耗时来源，给足超时（自托管下也受此约束） */
 export const maxDuration = 60;
 
 const bodySchema = z.object({
@@ -33,11 +34,13 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
 /**
  * 客户消息入口 —— 系统的"主干起点"。
  *
- *   写入消息（幂等）
- *     → 触发 AI pipeline（M6 会在这里插入"连续消息聚合窗口"）
- *     → 返回 建议 / 状态变化 / 是否降级
+ * 连续消息合并（进阶挑战 2）就落在这里：
+ *   ① 决定这条消息属于哪一批（窗口内复用当前批次，否则开新批次）
+ *   ② 消息入库并带上 batchId
+ *   ③ **不立即调用 AI**，而是安排窗口到期后统一判断（客户还在打字就再等等）
+ *   ④ 顺带做一次兜底扫描，拾起"窗口已过期但没有建议"的历史批次（进程重启后也不会丢）
  *
- * 幂等命中时**不会重复调用 AI**，直接返回最近一条判断结果。
+ * 因此这个接口的响应是"已收到，待判断"（pending），前端会轮询建议是否生成完成。
  */
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -53,10 +56,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       );
     }
 
+    // ① 先决定批次（依据是"已有的"消息，所以必须在写入之前）
+    const { batchId, isNewBatch } = await resolveBatchId(ctx, id);
+
+    // ② 入库（幂等仍由 clientMessageId 保证）
     const result = await appendCustomerMessage(ctx, {
       customerId: id,
       content: parsed.data.content,
       clientMessageId: parsed.data.clientMessageId,
+      batchId,
     });
 
     // 重复提交：不重复调用 AI，返回最近一次判断
@@ -66,47 +74,30 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         message: result.message,
         deduplicated: true,
         suggestion,
+        pending: false,
         agentError: null,
       });
     }
 
-    try {
-      const agent = await runAgent({
-        ctx,
-        customerId: id,
-        messageIds: [result.message.id],
-        trigger: 'NEW_MESSAGE',
-      });
+    // ③ 安排窗口到期后的统一判断（同一批次会顺延，避免客户还在打字时就抢答）
+    scheduleBatch({ batchId, tenantId: ctx.tenantId, customerId: id });
 
-      return NextResponse.json(
-        {
-          message: result.message,
-          deduplicated: false,
-          suggestion: agent.suggestion,
-          adjustments: agent.adjustments,
-          state: agent.state,
-          status: agent.status,
-          attempts: agent.attempts,
-          // 规则守护的判定结果与交接规则的触发说明（排障与演示都用得上）
-          guardViolations: agent.guardViolations,
-          handoffNotes: agent.handoffNotes,
-          agentError: null,
-        },
-        { status: 201 },
-      );
-    } catch (agentError) {
-      // 消息已经入库，AI 失败不能连累"消息发送"这件事本身
-      console.error('[api/messages] AI pipeline 失败', agentError);
-      return NextResponse.json(
-        {
-          message: result.message,
-          deduplicated: false,
-          suggestion: null,
-          agentError: (agentError as Error).message,
-        },
-        { status: 201 },
-      );
-    }
+    // ④ 兜底扫描：不与本次请求同步等待，失败也不影响消息入库
+    void sweepExpiredBatches().catch((error) => console.error('[api/messages] 兜底扫描失败', error));
+
+    return NextResponse.json(
+      {
+        message: result.message,
+        deduplicated: false,
+        pending: true,
+        batchId,
+        isNewBatch,
+        batchWindowMs: env.batchWindowMs,
+        suggestion: null,
+        agentError: null,
+      },
+      { status: 201 },
+    );
   } catch (error) {
     return jsonError(error, 'messages:create');
   }

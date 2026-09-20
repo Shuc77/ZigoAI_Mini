@@ -37,10 +37,16 @@ const fail = (name, detail = '') => {
   console.log(`  \u2717 ${name}${detail ? ` — ${detail}` : ''}`);
 };
 
-/** favicon / touch icon 的 404、以及 Next 路由预取的主动取消，都是噪音，不算功能错误 */
+/**
+ * 噪音过滤：
+ *  - favicon / apple-touch-icon 是浏览器自动请求；
+ *  - Next 路由预取被主动取消（带 _rsc= 的 ERR_ABORTED）属正常行为；
+ *  - `/_next/hmr` 的 WebSocket 报错只存在于 `next dev`，生产容器里没有。
+ */
 const isNoise = (text) =>
   /favicon|apple-touch-icon|manifest\.json/i.test(text) ||
-  (/ERR_ABORTED/.test(text) && /_rsc=/.test(text));
+  (/ERR_ABORTED/.test(text) && /_rsc=/.test(text)) ||
+  /_next\/hmr|WebSocket connection/i.test(text);
 
 console.log(`\n[e2e] 浏览器：${channel} | 目标：${baseUrl}\n`);
 

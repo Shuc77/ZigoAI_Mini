@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
+import { countBatchMessages } from '@/lib/agent/batch';
 import { formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
@@ -43,6 +44,14 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
       latestSuggestion.sentAt &&
       (!lastCustomerMessageAt || latestSuggestion.sentAt > lastCustomerMessageAt),
   );
+
+  /**
+   * 本轮合并了多少条客户消息 —— 连续消息合并的可见证据。
+   * 判据：本次建议绑定的 batchId 下有多少条客户消息。
+   */
+  const batchMessageCount = latestSuggestion?.batchId
+    ? await countBatchMessages(ctx.tenantId, latestSuggestion.batchId)
+    : null;
 
   return (
     <div className="space-y-4">
@@ -157,6 +166,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
             suggestion={latestSuggestion}
             rules={tenantConfig.rules}
             waitingForCustomer={waitingForCustomer}
+            batchMessageCount={batchMessageCount}
             actions={
               latestSuggestion ? (
                 <SuggestionActions

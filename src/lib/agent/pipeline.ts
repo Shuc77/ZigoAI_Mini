@@ -319,6 +319,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     outcome,
     finalState,
     adjustments,
+    handoffNotes: handoff.notes,
     ruleViolation,
     expectedVersion: currentState.version,
   });
@@ -454,6 +455,7 @@ async function persistWithOptimisticLock(params: {
   outcome: ValidationOutcome;
   finalState: { leadStage: AgentOutput['lead_stage']; intent: string; needHuman: boolean; humanReason: string | null };
   adjustments: StateAdjustment[];
+  handoffNotes: string[];
   ruleViolation: string | null;
   expectedVersion: number;
 }): Promise<{ suggestion: AiSuggestion; state: { leadStage: string; intent: string; needHuman: boolean; version: number } }> {
@@ -480,6 +482,9 @@ async function persistWithOptimisticLock(params: {
             trigger: params.trigger,
             stateAdjustments: params.adjustments.length
               ? (params.adjustments as unknown as Prisma.InputJsonValue)
+              : undefined,
+            handoffNotes: params.handoffNotes.length
+              ? (params.handoffNotes as unknown as Prisma.InputJsonValue)
               : undefined,
             ruleViolation: params.ruleViolation,
             status: params.outcome.status,

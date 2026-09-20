@@ -20,6 +20,7 @@
     "db:migrate": "node --env-file=.env scripts/db-migrate.mjs",
     "db:deploy": "node scripts/db-migrate.mjs",
     "db:seed": "tsx prisma/seed.ts",
+    "agent:scan": "tsx scripts/agent-scan.ts",
     "followup:scan": "tsx scripts/followup-scan.ts"
   },
   "dependencies": {

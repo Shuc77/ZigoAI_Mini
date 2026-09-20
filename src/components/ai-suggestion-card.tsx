@@ -24,6 +24,7 @@ export function AiSuggestionCard({
   rules,
   actions,
   waitingForCustomer = false,
+  batchMessageCount = null,
 }: {
   suggestion: AiSuggestion | null;
   rules: TenantRules;
@@ -35,6 +36,8 @@ export function AiSuggestionCard({
    * 真正需要的是让销售知道"现在轮到客户了"。
    */
   waitingForCustomer?: boolean;
+  /** 本轮合并了多少条客户消息（连续消息合并的可见证据） */
+  batchMessageCount?: number | null;
 }) {
   if (!suggestion) {
     return (
@@ -84,6 +87,13 @@ export function AiSuggestionCard({
           ) : null}
           <span>prompt {suggestion.promptVersion}</span>
         </div>
+
+        {batchMessageCount !== null && batchMessageCount > 1 ? (
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-800">
+            本轮把客户连续发送的 <span className="font-medium">{batchMessageCount}</span> 条消息
+            <span className="font-medium">合并为一次判断</span>（否则会连续回复 {batchMessageCount} 次）
+          </div>
+        ) : null}
 
         {suggestion.status === 'FALLBACK' || suggestion.status === 'ERROR' ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">

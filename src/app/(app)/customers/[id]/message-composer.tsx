@@ -21,6 +21,43 @@ export function MessageComposer({ customerId }: { customerId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  /**
+   * 等待这一批消息的 AI 判断完成。
+   *
+   * 引入"连续消息合并"后，发消息接口不再同步返回建议 —— 它会先等一个聚合窗口
+   * （客户可能还在继续打字），窗口关闭后才统一判断。所以这里轮询批次状态，
+   * 一旦建议生成就刷新页面。整个过程对销售是可见的："已收到，正在等待后续消息…"。
+   */
+  async function waitForSuggestion(batchId: string, windowMs: number) {
+    const deadline = Date.now() + Math.max(30_000, windowMs * 4);
+    setNotice(`已收到消息，正在等待客户是否继续发言…（约 ${Math.round(windowMs / 1000)} 秒后统一判断）`);
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        const response = await fetch(
+          `/api/customers/${customerId}/suggestion?batchId=${encodeURIComponent(batchId)}`,
+        );
+        if (!response.ok) continue;
+        const data = (await response.json()) as {
+          suggestion?: unknown;
+          batchMessageCount?: number | null;
+        };
+        if (data.suggestion) {
+          const count = data.batchMessageCount ?? 1;
+          setNotice(count > 1 ? `AI 已把本轮 ${count} 条消息合并判断完成` : null);
+          router.refresh();
+          return;
+        }
+      } catch {
+        /* 轮询失败就继续等，超时后给用户一个提示 */
+      }
+    }
+
+    setNotice('AI 判断仍在进行，可稍后刷新页面查看结果');
+    router.refresh();
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const text = content.trim();
@@ -39,7 +76,13 @@ export function MessageComposer({ customerId }: { customerId: string }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, clientMessageId: id }),
       });
-      const data = (await response.json()) as { message?: string; deduplicated?: boolean };
+      const data = (await response.json()) as {
+        message?: string;
+        deduplicated?: boolean;
+        pending?: boolean;
+        batchId?: string;
+        batchWindowMs?: number;
+      };
 
       if (!response.ok) {
         setClientMessageId(id);
@@ -49,8 +92,17 @@ export function MessageComposer({ customerId }: { customerId: string }) {
 
       setClientMessageId('');
       setContent('');
-      if (data.deduplicated) setNotice('检测到重复提交，已按同一条消息处理（未重复落库）');
+
+      if (data.deduplicated) {
+        setNotice('检测到重复提交，已按同一条消息处理（未重复落库）');
+        router.refresh();
+        return;
+      }
+
       router.refresh();
+      if (data.pending && data.batchId) {
+        await waitForSuggestion(data.batchId, data.batchWindowMs ?? 8000);
+      }
     } catch {
       setClientMessageId(id);
       setError('网络异常，可直接重试（同一条消息不会重复入库）');
