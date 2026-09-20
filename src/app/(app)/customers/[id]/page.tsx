@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
 import { countBatchMessages } from '@/lib/agent/batch';
+import { explainFollowUp } from '@/lib/agent/followup';
 import { formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
@@ -10,6 +11,7 @@ import { requireCustomer } from '@/server/repositories/customers';
 import { listMessages } from '@/server/repositories/messages';
 import { getLatestSuggestion } from '@/server/repositories/suggestions';
 import { getTenantConfig } from '@/server/repositories/tenants';
+import { FollowupActions } from './followup-actions';
 import { MessageComposer } from './message-composer';
 import { MessageList } from './message-list';
 import { StateActions } from './state-actions';
@@ -27,10 +29,11 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     notFound();
   }
 
-  const [messages, latestSuggestion, tenantConfig] = await Promise.all([
+  const [messages, latestSuggestion, tenantConfig, followUpDecision] = await Promise.all([
     listMessages(ctx, customer.id),
     getLatestSuggestion(ctx, customer.id),
     getTenantConfig(ctx),
+    explainFollowUp(customer.id),
   ]);
   const state = customer.state;
 
@@ -160,6 +163,8 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
               needHuman={state?.needHuman ?? false}
               leadStage={state?.leadStage ?? 'NEW'}
             />
+
+            <FollowupActions customerId={customer.id} decision={followUpDecision} />
           </div>
 
           <AiSuggestionCard

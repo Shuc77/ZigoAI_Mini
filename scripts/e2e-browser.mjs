@@ -179,12 +179,37 @@ try {
     fail('未看到合并判断的标注', 'AI 卡片未出现"合并为一次判断"提示');
   }
 
-  // ---- 7. 刷新后数据仍在（持久化） ----
+  // ---- 7. Follow-up 演示链路（界面接线验证） ----
+  try {
+    const travelButton = page.locator('button', { hasText: '模拟静默 30 分钟' });
+    await travelButton.scrollIntoViewIfNeeded();
+    await travelButton.click();
+    await page.locator('text=/已把客户最后发言时间往前拨/').waitFor({ timeout: 30_000 });
+    ok('可模拟时间流逝（界面）', '跟进区块显示了模拟结果');
+
+    const scanResponse = await Promise.all([
+      page.waitForResponse(
+        (r) => r.url().includes('/followup') && r.request().method() === 'POST',
+        { timeout: 30_000 },
+      ),
+      page.locator('button', { hasText: '立即扫描跟进' }).click(),
+    ]).then(([response]) => response);
+
+    if (scanResponse.status() === 200) {
+      ok('跟进扫描接口可调用', 'HTTP 200');
+    } else {
+      fail('跟进扫描接口异常', `HTTP ${scanResponse.status()}`);
+    }
+  } catch (error) {
+    fail('跟进区块交互失败', String(error.message ?? error).split('\n')[0]);
+  }
+
+  // ---- 8. 刷新后数据仍在（持久化） ----
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByTestId('chat-messages').getByText(sentText).waitFor({ timeout: 30_000 });
   ok('刷新页面后数据仍在（已持久化）');
 
-  // ---- 8. 客户端零异常 ----
+  // ---- 9. 客户端零异常 ----
   if (httpErrors.length === 0) {
     ok('无 4xx / 5xx 请求', '静态资源与接口全部正常');
   } else {

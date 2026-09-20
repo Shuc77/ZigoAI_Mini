@@ -721,6 +721,98 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
     }
   }
 }
+
+// --- 8. 进阶挑战 1：Follow-up -------------------------------------------------
+console.log('\n进阶挑战 1 · Follow-up（客户静默跟进）');
+{
+  const lemengCookie = sessions['sales@lemeng.demo'];
+  const jixieCookie = sessions['sales@jixie.demo'];
+
+  const lemengCustomers = await fetch(`${baseUrl}/api/customers`, { headers: { cookie: lemengCookie } }).then((r) => r.json());
+  const jixieCustomers = await fetch(`${baseUrl}/api/customers`, { headers: { cookie: jixieCookie } }).then((r) => r.json());
+
+  const smokeCustomer = (lemengCustomers.customers ?? []).find((c) => c.handle === 'smoke_test_handle');
+  const huangZong = (jixieCustomers.customers ?? []).find((c) => c.handle === 'huang_zong');
+  const chenNvshi = (lemengCustomers.customers ?? []).find((c) => c.handle === 'chen_nvshi');
+
+  async function followup(cookie, customerId, body) {
+    const response = await fetch(`${baseUrl}/api/customers/${customerId}/followup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json().catch(() => ({})) };
+  }
+
+  // 8.1 正例：客户发言后静默超时 → 应生成跟进建议
+  if (smokeCustomer) {
+    // 先让客户说一句（这会把跟进计数归零），并等这一轮判断结束
+    await sendAndAwaitSuggestion(lemengCookie, smokeCustomer.id, '那我再考虑一下，晚点回复你。');
+
+    // 前置条件清理：这一轮判断可能自己把"需人工"标记置上（前序用例也留下过），
+    // 而"需人工"客户按设计不自动跟进，所以这里显式清除，保证测的是跟进逻辑本身。
+    await fetch(`${baseUrl}/api/customers/${smokeCustomer.id}/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+      body: JSON.stringify({ action: 'RESOLVE_HUMAN' }),
+    });
+
+    const travel = await followup(lemengCookie, smokeCustomer.id, { action: 'TIME_TRAVEL', minutes: 30 });
+    if (travel.status === 200) {
+      ok('可模拟时间流逝', '把客户最后发言时间往前拨 30 分钟');
+    } else {
+      fail('时间旅行失败', `HTTP ${travel.status}`);
+    }
+
+    const scan = await followup(lemengCookie, smokeCustomer.id, { action: 'SCAN' });
+    const decision = scan.body?.decision ?? {};
+
+    if (scan.body?.followed === true && decision.rule === 'SHOULD_FOLLOW_UP') {
+      ok('静默客户触发跟进', `判定：${String(decision.reason ?? '').slice(0, 36)}`);
+    } else {
+      fail('静默客户未触发跟进', `followed=${scan.body?.followed} rule=${decision.rule}`);
+    }
+
+    const latest = await fetch(`${baseUrl}/api/customers/${smokeCustomer.id}/suggestion`, {
+      headers: { cookie: lemengCookie },
+    }).then((r) => r.json());
+    if (latest.suggestion?.trigger === 'FOLLOW_UP') {
+      ok('跟进建议的触发来源正确', 'trigger=FOLLOW_UP');
+    } else {
+      fail('跟进建议触发来源不正确', `trigger=${latest.suggestion?.trigger}`);
+    }
+
+    // 8.2 冷却期：刚跟进完立刻再扫，不应重复跟进
+    // 断言只关心"有没有重复跟进"；具体是哪条规则拦下的（冷却/次数上限/已转人工…）不影响结论
+    const again = await followup(lemengCookie, smokeCustomer.id, { action: 'SCAN' });
+    const againRule = again.body?.decision?.rule;
+    if (again.body?.followed === false && againRule !== 'SHOULD_FOLLOW_UP') {
+      ok('不会重复跟进同一客户', `判定规则 ${againRule}`);
+    } else {
+      fail('重复跟进未被拦截', `followed=${again.body?.followed} rule=${againRule}`);
+    }
+  }
+
+  // 8.3 反例：已成交客户不跟进
+  if (huangZong) {
+    const scan = await followup(jixieCookie, huangZong.id, { action: 'SCAN' });
+    if (scan.body?.followed === false && scan.body?.decision?.rule === 'TERMINAL_STAGE') {
+      ok('已成交客户不自动跟进', '终态客户不再打扰');
+    } else {
+      fail('终态客户被错误跟进', `rule=${scan.body?.decision?.rule}`);
+    }
+  }
+
+  // 8.4 反例：已标记需人工的客户不跟进（交给销售）
+  if (chenNvshi) {
+    const scan = await followup(lemengCookie, chenNvshi.id, { action: 'SCAN' });
+    if (scan.body?.followed === false && scan.body?.decision?.rule === 'HUMAN_PENDING') {
+      ok('需人工客户不自动跟进', '交给销售人工处理，系统不催');
+    } else {
+      fail('需人工客户被错误跟进', `rule=${scan.body?.decision?.rule}`);
+    }
+  }
+}
 console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项`);
 if (failed === 0 && /127\.0\.0\.1|localhost/.test(baseUrl)) {
   console.log('[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。演示前执行 `pnpm db:seed` 可重置演示数据（该客户也会被清除）。');

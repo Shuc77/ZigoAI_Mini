@@ -50,6 +50,8 @@ export const env = {
   followUpIdleMinutes: num('FOLLOWUP_IDLE_MINUTES', 2),
   /** 最大跟进次数，防止无限打扰客户 */
   followUpMaxAttempts: num('FOLLOWUP_MAX_ATTEMPTS', 2),
+  /** 两次跟进之间的冷却期（分钟）；设为 0 则自动取静默阈值的 2 倍 */
+  followUpCooldownMinutes: num('FOLLOWUP_COOLDOWN_MINUTES', 0),
 } as const;
 
 /** 按 token 用量估算人民币成本（用于 AiSuggestion.estimatedCostCny 与 AI 日志页） */

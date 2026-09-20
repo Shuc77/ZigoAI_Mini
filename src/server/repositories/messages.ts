@@ -70,7 +70,13 @@ export async function appendCustomerMessage(
       await tx.customer.update({ where: { id: customer.id }, data: { updatedAt: now } });
       await tx.customerState.update({
         where: { customerId: customer.id },
-        data: { lastContactAt: now, lastCustomerMessageAt: now },
+        data: {
+          lastContactAt: now,
+          lastCustomerMessageAt: now,
+          // 客户再次发言 = 上一轮"静默"结束，跟进计数归零，开始新的跟进周期。
+          // 否则跟进次数会跨多次对话累计，几次之后就再也不提醒了。
+          followUpCount: 0,
+        },
       });
 
       return created;
