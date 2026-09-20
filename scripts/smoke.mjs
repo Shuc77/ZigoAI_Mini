@@ -377,16 +377,16 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
       fail('销售发送回复失败', `HTTP ${sendResponse.status} ${JSON.stringify(sendBody).slice(0, 120)}`);
     }
 
-    // 2) 发送内容必须进入聊天记录
+    // 2) 发送内容必须进入聊天记录（按返回的消息 id 精确断言，避免"重复文本"干扰）
     const messages = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
       headers: { cookie },
     }).then((r) => r.json());
-    const sent = (messages.messages ?? []).filter((m) => m.role === 'SALES' && m.content === editedReply);
+    const sent = (messages.messages ?? []).filter((m) => m.id === sendBody.message?.id);
 
-    if (sent.length === 1) {
+    if (sent.length === 1 && sent[0].role === 'SALES' && sent[0].content === editedReply) {
       ok('发送内容已进入聊天记录', '并在下一轮判断中作为历史对话被读取');
     } else {
-      fail('发送内容未正确入库', `匹配 ${sent.length} 条`);
+      fail('发送内容未正确入库', `按 id 匹配到 ${sent.length} 条`);
     }
 
     // 3) 建议留痕：改了什么都记得住
@@ -399,6 +399,24 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
       } else {
         fail('建议留痕缺失', '未看到"销售实际发送"区块');
       }
+    }
+
+    // 3.5) 核心任务 4 的关键要求：发出去的内容必须"参与下一轮 AI 判断"
+    // 做法：再让客户发一条消息，然后检查这一次判断的原始请求里是否真的带上了销售刚发的那句话
+    const nextRound = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({
+        content: '好的，下午三点后我在。',
+        clientMessageId: `smoke-nextround-${Date.now()}`,
+      }),
+    });
+    const nextBody = await nextRound.json();
+    const rawPrompt = JSON.stringify(nextBody.suggestion?.rawRequest ?? {});
+    if (nextBody.suggestion && rawPrompt.includes(editedReply)) {
+      ok('销售消息参与下一轮 AI 判断', '已在下一轮 prompt 的历史对话中带上');
+    } else {
+      fail('销售消息未参与下一轮判断', '下一轮 prompt 里找不到销售刚发送的内容');
     }
 
     // 4) 重新生成：应产生一条新的建议

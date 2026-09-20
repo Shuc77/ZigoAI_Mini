@@ -32,6 +32,17 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
   ]);
   const state = customer.state;
 
+  /**
+   * "已回复、等待客户回应" —— 派生状态，不额外调用 AI。
+   * 判据：最新一条建议已发送，且此后客户没有再发消息（销售的最后一次外发晚于客户最后一次说话）。
+   */
+  const lastCustomerMessageAt = state?.lastCustomerMessageAt ?? null;
+  const waitingForCustomer = Boolean(
+    latestSuggestion?.sentMessageId &&
+      latestSuggestion.sentAt &&
+      (!lastCustomerMessageAt || latestSuggestion.sentAt > lastCustomerMessageAt),
+  );
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3 text-sm text-slate-500">
@@ -151,6 +162,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
           <AiSuggestionCard
             suggestion={latestSuggestion}
             rules={tenantConfig.rules}
+            waitingForCustomer={waitingForCustomer}
             actions={
               latestSuggestion ? (
                 <SuggestionActions

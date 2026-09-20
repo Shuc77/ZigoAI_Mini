@@ -19,11 +19,18 @@ export function AiSuggestionCard({
   suggestion,
   rules,
   actions,
+  waitingForCustomer = false,
 }: {
   suggestion: AiSuggestion | null;
   rules: TenantRules;
   /** M3 起注入"编辑回复 / 发送 / 重新生成"等交互 */
   actions?: React.ReactNode;
+  /**
+   * 已按建议回复客户、且客户之后还没再说话 —— 由"最后一条销售消息晚于最后一条客户消息"推导。
+   * 这是**派生状态**，不额外调用 AI：销售回完话之后，判断对象（客户）并没有新证据，
+   * 真正需要的是让销售知道"现在轮到客户了"。
+   */
+  waitingForCustomer?: boolean;
 }) {
   if (!suggestion) {
     return (
@@ -51,6 +58,13 @@ export function AiSuggestionCard({
       </div>
 
       <div className="space-y-3 px-4 py-3 text-sm">
+        {waitingForCustomer ? (
+          <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+            <span className="font-medium">已回复客户，正在等待客户回应。</span>
+            客户再发消息时会自动重新判断；若长时间无回应，系统会在 Follow-up 中提示跟进。
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
           <span>{formatDateTime(suggestion.createdAt)}</span>
           <span>{suggestion.model}</span>
