@@ -141,6 +141,109 @@ await expectVisible('sales@lemeng.demo', LEMENG, JIXIE);
 await expectVisible('sales@jixie.demo', JIXIE, LEMENG);
 await expectVisible('manager@lemeng.demo', LEMENG, JIXIE);
 
+// --- 4. 核心任务 1：客户与聊天记录 ------------------------------------------
+console.log('\n核心任务 1 · 客户与聊天记录');
+{
+  const cookie = sessions['sales@lemeng.demo'];
+  const foreignCookie = sessions['sales@jixie.demo'];
+  const SMOKE_HANDLE = 'smoke_test_handle';
+
+  // 幂等：已存在就复用，避免每次冒烟都堆一个新客户
+  const listResponse = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } });
+  const list = await listResponse.json();
+  let target = (list.customers ?? []).find((c) => c.handle === SMOKE_HANDLE);
+
+  if (!target) {
+    const created = await fetch(`${baseUrl}/api/customers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({
+        name: '冒烟测试客户',
+        handle: SMOKE_HANDLE,
+        source: 'scripts/smoke.mjs',
+        note: '由自动化冒烟脚本创建，可安全删除',
+      }),
+    });
+    if (created.status === 201) {
+      const body = await created.json();
+      target = body.customer;
+      ok('创建客户成功', `HTTP 201 · ${target.name}`);
+    } else {
+      fail('创建客户失败', `HTTP ${created.status}`);
+    }
+  } else {
+    ok('复用已有冒烟测试客户', target.name);
+  }
+
+  if (target) {
+    const detail = await fetch(`${baseUrl}/customers/${target.id}`, { headers: { cookie } });
+    const html = await detail.text();
+    if (detail.status === 200 && html.includes('Customer State')) {
+      ok('客户详情页可访问', `含聊天记录与状态卡片`);
+    } else {
+      fail('客户详情页异常', `HTTP ${detail.status}`);
+    }
+
+    const before = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      headers: { cookie },
+    }).then((r) => r.json());
+    const beforeCount = (before.messages ?? []).length;
+
+    const clientMessageId = `smoke-${target.id}`;
+    const payload = JSON.stringify({
+      content: '你们周末有课吗？（冒烟测试消息）',
+      clientMessageId,
+    });
+
+    const first = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: payload,
+    });
+    const firstBody = await first.json();
+    if (first.status === 201 && firstBody.message?.role === 'CUSTOMER') {
+      ok('录入客户消息成功', `HTTP 201 · 已入库并更新状态时间`);
+    } else {
+      fail('录入客户消息失败', `HTTP ${first.status} ${JSON.stringify(firstBody).slice(0, 120)}`);
+    }
+
+    // 同一条消息重复提交：必须识别为重复，且不产生新消息
+    const second = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: payload,
+    });
+    const secondBody = await second.json();
+    const after = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      headers: { cookie },
+    }).then((r) => r.json());
+
+    const grew = (after.messages ?? []).length - beforeCount;
+    if (secondBody.deduplicated === true && grew === 1) {
+      ok('消息幂等生效', `重复提交未产生新消息（本客户共新增 ${grew} 条）`);
+    } else {
+      fail('消息幂等失效', `deduplicated=${secondBody.deduplicated}, 新增 ${grew} 条`);
+    }
+
+    // 跨租户访问：机械之家的账号访问乐蒙的客户必须 404
+    const forbidden = await fetch(`${baseUrl}/customers/${target.id}`, { headers: { cookie: foreignCookie } });
+    if (forbidden.status === 404) {
+      ok('跨租户访问返回 404', '未暴露"存在但不属于你"');
+    } else {
+      fail('跨租户访问未被隔离', `HTTP ${forbidden.status}`);
+    }
+
+    const forbiddenApi = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      headers: { cookie: foreignCookie },
+    });
+    if (forbiddenApi.status === 404) {
+      ok('跨租户 API 访问返回 404');
+    } else {
+      fail('跨租户 API 未被隔离', `HTTP ${forbiddenApi.status}`);
+    }
+  }
+}
+
 // --- 汇总 ------------------------------------------------------------------
 console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -1,20 +1,10 @@
 import Link from 'next/link';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
+import { formatRelative } from '@/lib/format';
 import { requirePageAuth } from '@/server/auth';
 import { listCustomers } from '@/server/repositories/customers';
 
 export const metadata = { title: '客户 · ZigoAI Mini' };
-
-function formatRelative(date: Date | null | undefined): string {
-  if (!date) return '—';
-  const diffMs = Date.now() - new Date(date).getTime();
-  const minutes = Math.round(diffMs / 60_000);
-  if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return `${Math.round(hours / 24)} 天前`;
-}
 
 export default async function CustomersPage() {
   const ctx = await requirePageAuth();
@@ -30,6 +20,12 @@ export default async function CustomersPage() {
             ，共 {customers.length} 位
           </p>
         </div>
+        <Link
+          href="/customers/new"
+          className="rounded-lg bg-indigo-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-indigo-700"
+        >
+          新建客户
+        </Link>
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
