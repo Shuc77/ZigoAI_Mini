@@ -106,3 +106,52 @@ export async function listAssignableUsers(ctx: AuthContext) {
     orderBy: { name: 'asc' },
   });
 }
+
+/**
+ * 人工状态操作 —— 与 AI 判断相对的"人的决定"。
+ *
+ * 为什么必须有这组接口：状态机把三件事锁死了（终态不可由 AI 改动、阶段不回退、
+ * 需人工标记只升不降），那么"解除"与"确认终态"就必须由人来完成，否则系统会卡在
+ * 需人工/高意向状态里无法继续。这正是"AI 提建议、人做决定"的落地。
+ */
+export type HumanStateAction = 'RESOLVE_HUMAN' | 'CONFIRM_WON' | 'CONFIRM_LOST' | 'REOPEN';
+
+export async function applyHumanStateAction(
+  ctx: AuthContext,
+  customerId: string,
+  action: HumanStateAction,
+) {
+  const customer = await requireCustomer(ctx, customerId);
+  if (!customer.state) throw notFound('客户状态');
+
+  const data =
+    action === 'RESOLVE_HUMAN'
+      ? { needHuman: false, humanReason: null }
+      : action === 'CONFIRM_WON'
+        ? { leadStage: 'WON' as const, needHuman: false, humanReason: null }
+        : action === 'CONFIRM_LOST'
+          ? { leadStage: 'LOST' as const, needHuman: false, humanReason: null }
+          : {
+              // 撤销终态：成交的退回高意向，流失的退回探需
+              leadStage: customer.state.leadStage === 'WON' ? ('HIGH_INTENT' as const) : ('DISCOVERY' as const),
+              needHuman: false,
+              humanReason: null,
+            };
+
+  // 乐观锁：人的操作同样不能覆盖并发中的 AI 判断
+  const updated = await prisma.customerState.updateMany({
+    where: { customerId: customer.id, version: customer.state.version },
+    data: { ...data, version: { increment: 1 } },
+  });
+
+  if (updated.count === 0) {
+    // 并发冲突：重新读取版本后重试一次
+    const fresh = await prisma.customerState.findUniqueOrThrow({ where: { customerId: customer.id } });
+    await prisma.customerState.updateMany({
+      where: { customerId: customer.id, version: fresh.version },
+      data: { ...data, version: { increment: 1 } },
+    });
+  }
+
+  return prisma.customerState.findUniqueOrThrow({ where: { customerId: customer.id } });
+}

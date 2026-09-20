@@ -22,6 +22,8 @@ const checkDeepSeek = args.includes('--deepseek');
 const PASSWORD = 'Zigo@2026';
 let passed = 0;
 let failed = 0;
+/** 跨小节共享的上下文（客户 id、最新建议 id） */
+const shared = { customerId: null, suggestionId: null };
 
 function ok(name, detail = '') {
   passed += 1;
@@ -288,6 +290,8 @@ console.log('\n核心任务 2/3 · AI 判断与 Customer State');
     }
 
     if (suggestion) {
+      shared.suggestionId = suggestion.id;
+      shared.customerId = target.id;
       const required = [
         'customerIntent',
         'leadStage',
@@ -343,6 +347,130 @@ console.log('\n核心任务 2/3 · AI 判断与 Customer State');
       } else {
         fail('判断卡片未正确渲染');
       }
+    }
+  }
+}
+
+// --- 6. 核心任务 4：销售回复 + 人工边界 --------------------------------------
+console.log('\n核心任务 4 · 销售回复与人工操作');
+{
+  const cookie = sessions['sales@lemeng.demo'];
+  const customerId = shared.customerId;
+  const suggestionId = shared.suggestionId;
+
+  if (!customerId || !suggestionId) {
+    fail('缺少上一节的上下文，跳过销售回复验证');
+  } else {
+    const editedReply = '非常抱歉给您带来不好的体验，我马上联系店长核实，今天下午给您回电可以吗？';
+
+    // 1) 销售修改后发送
+    const sendResponse = await fetch(`${baseUrl}/api/suggestions/${suggestionId}/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ reply: editedReply }),
+    });
+    const sendBody = await sendResponse.json();
+
+    if (sendResponse.status === 201 && sendBody.message?.role === 'SALES') {
+      ok('销售发送回复成功', `HTTP 201 · ${sendBody.edited ? '已修改 AI 建议' : '按 AI 原文'}`);
+    } else {
+      fail('销售发送回复失败', `HTTP ${sendResponse.status} ${JSON.stringify(sendBody).slice(0, 120)}`);
+    }
+
+    // 2) 发送内容必须进入聊天记录
+    const messages = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+      headers: { cookie },
+    }).then((r) => r.json());
+    const sent = (messages.messages ?? []).filter((m) => m.role === 'SALES' && m.content === editedReply);
+
+    if (sent.length === 1) {
+      ok('发送内容已进入聊天记录', '并在下一轮判断中作为历史对话被读取');
+    } else {
+      fail('发送内容未正确入库', `匹配 ${sent.length} 条`);
+    }
+
+    // 3) 建议留痕：改了什么都记得住
+    const detail = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, { headers: { cookie } });
+    if (detail.status === 200) {
+      const page = await fetch(`${baseUrl}/customers/${customerId}`, { headers: { cookie } }).then((r) => r.text());
+      const tracked = page.includes('销售实际发送') && page.includes(editedReply.slice(0, 12));
+      if (tracked) {
+        ok('建议留痕完整', '页面同时展示 AI 原文与销售实际发送内容');
+      } else {
+        fail('建议留痕缺失', '未看到"销售实际发送"区块');
+      }
+    }
+
+    // 4) 重新生成：应产生一条新的建议
+    const regen = await fetch(`${baseUrl}/api/suggestions/${suggestionId}/regenerate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ useProModel: false }),
+    });
+    const regenBody = await regen.json();
+    if (regen.status === 200 && regenBody.suggestion?.id && regenBody.suggestion.id !== suggestionId) {
+      ok('重新生成产生新建议', `${regenBody.suggestion.customerIntent} / ${regenBody.suggestion.nextAction}`);
+      shared.suggestionId = regenBody.suggestion.id;
+    } else {
+      fail('重新生成失败', `HTTP ${regen.status}`);
+    }
+
+    // 5) 人工操作：解除"需人工"
+    await fetch(`${baseUrl}/api/customers/${customerId}/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ action: 'RESOLVE_HUMAN' }),
+    });
+    const afterResolve = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+    const resolved = (afterResolve.customers ?? []).find((c) => c.id === customerId);
+    if (resolved?.state?.needHuman === false) {
+      ok('人工可解除"需人工"标记', '状态机上锁、人来解锁');
+    } else {
+      fail('解除人工标记失败', `needHuman=${resolved?.state?.needHuman}`);
+    }
+
+    // 6) 人工确认成交 → 终态
+    await fetch(`${baseUrl}/api/customers/${customerId}/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ action: 'CONFIRM_WON' }),
+    });
+
+    // 7) 端到端终态保护：成交后再来客户消息，AI 不得把阶段改回去
+    const afterWon = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({
+        content: '算了，我再考虑考虑，先不报了。',
+        clientMessageId: `smoke-terminal-${Date.now()}`,
+      }),
+    });
+    const wonBody = await afterWon.json();
+    const stageAfter = wonBody.state?.after?.leadStage ?? wonBody.state?.before?.leadStage;
+
+    if (stageAfter === 'WON') {
+      const adjustments = wonBody.adjustments ?? [];
+      ok(
+        '端到端终态保护生效',
+        adjustments.length > 0
+          ? `AI 建议被系统修正：${adjustments.map((a) => a.rule).join('、')}`
+          : 'AI 未尝试改动终态',
+      );
+    } else {
+      fail('终态被 AI 改动', `阶段变成 ${stageAfter}`);
+    }
+
+    // 8) 收尾：撤销终态，保证脚本可重复运行
+    const reopen = await fetch(`${baseUrl}/api/customers/${customerId}/state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({ action: 'REOPEN' }),
+    });
+    const reopenBody = await reopen.json();
+    if (reopen.status === 200 && reopenBody.state?.leadStage === 'HIGH_INTENT') {
+      ok('可撤销终态（重新激活）', '避免演示数据被锁死');
+    } else {
+      fail('撤销终态失败', `stage=${reopenBody.state?.leadStage}`);
     }
   }
 }

@@ -122,10 +122,25 @@ export function AiSuggestionCard({
         </div>
 
         <div>
-          <div className="mb-1 text-xs text-slate-500">建议回复</div>
+          <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
+            <span>建议回复</span>
+            {suggestion.sentMessageId ? (
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-700">
+                {suggestion.finalReply === suggestion.reply ? '已按建议发送' : '已修改后发送'}
+              </span>
+            ) : null}
+          </div>
           <div className="prewrap rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-sm leading-relaxed text-slate-800">
             {suggestion.reply}
           </div>
+          {suggestion.sentMessageId && suggestion.finalReply && suggestion.finalReply !== suggestion.reply ? (
+            <div className="mt-2">
+              <div className="mb-1 text-xs text-slate-500">销售实际发送</div>
+              <div className="prewrap rounded-lg border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-sm leading-relaxed text-slate-800">
+                {suggestion.finalReply}
+              </div>
+            </div>
+          ) : null}
         </div>
 
         {adjustments.length > 0 ? (

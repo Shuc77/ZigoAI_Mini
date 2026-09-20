@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { badRequest } from '@/lib/errors';
+import { badRequest, notFound } from '@/lib/errors';
 import type { AuthContext } from '@/lib/types';
 import { requireCustomer } from '@/server/repositories/customers';
 
@@ -125,4 +125,61 @@ export async function appendSalesMessage(
 
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'P2002';
+}
+
+/**
+ * 销售确认发送 AI 建议（核心任务 4 的落点）。
+ *
+ * 语义要点：
+ *  1) 真正入库的是一线销售**最终确认的文本**（可能已在建议基础上改过），而不是 AI 的原始回复；
+ *  2) 发送后这条消息进入聊天记录，**参与下一轮 AI 判断**（历史对话里会出现它）；
+ *  3) 建议上留痕：sentMessageId / finalReply / sentAt —— 于是"AI 建议了什么、人改成了什么、
+ *     最后发出去的是什么"三者可追溯，也就能统计采纳率与修改率。
+ */
+export async function sendSuggestionReply(
+  ctx: AuthContext,
+  suggestionId: string,
+  reply: string,
+): Promise<{ message: Awaited<ReturnType<typeof prisma.message.create>>; edited: boolean }> {
+  const suggestion = await prisma.aiSuggestion.findFirst({
+    where: { id: suggestionId, tenantId: ctx.tenantId },
+  });
+  if (!suggestion) throw notFound('AI 建议');
+
+  // 复用客户作用域校验：拿到不属于自己的建议时同样 404
+  const customer = await requireCustomer(ctx, suggestion.customerId);
+
+  const content = reply.trim();
+  if (!content) throw badRequest('回复内容不能为空');
+
+  const message = await prisma.$transaction(async (tx) => {
+    const created = await tx.message.create({
+      data: {
+        tenantId: ctx.tenantId,
+        customerId: customer.id,
+        role: 'SALES',
+        content,
+        senderUserId: ctx.userId,
+        batchId: suggestion.batchId,
+      },
+    });
+
+    await tx.customer.update({ where: { id: customer.id }, data: { updatedAt: created.createdAt } });
+    await tx.customerState.update({
+      where: { customerId: customer.id },
+      data: { lastContactAt: created.createdAt },
+    });
+    await tx.aiSuggestion.update({
+      where: { id: suggestionId },
+      data: {
+        sentMessageId: created.id,
+        finalReply: content,
+        sentAt: created.createdAt,
+      },
+    });
+
+    return created;
+  });
+
+  return { message, edited: content !== suggestion.reply };
 }

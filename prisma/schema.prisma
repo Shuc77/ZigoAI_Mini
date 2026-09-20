@@ -192,6 +192,11 @@ model AiSuggestion {
   estimatedCostCny Float?
   retryCount     Int              @default(0)
   errorMessage   String?
+  /// 销售确认发送后：实际发出的消息 id（AI 建议 → 真实消息的追溯链）
+  sentMessageId  String?
+  /// 销售实际发出的文本（与 reply 不同即说明人工做过修改）
+  finalReply     String?
+  sentAt         DateTime?
   createdAt      DateTime         @default(now())
 
   tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)

@@ -10,6 +10,8 @@ import { listMessages } from '@/server/repositories/messages';
 import { getLatestSuggestion } from '@/server/repositories/suggestions';
 import { getTenantConfig } from '@/server/repositories/tenants';
 import { MessageComposer } from './message-composer';
+import { StateActions } from './state-actions';
+import { SuggestionActions } from './suggestion-actions';
 
 export default async function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -138,9 +140,28 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
                 <dd className="font-mono text-xs text-slate-500">v{state?.version ?? 0}</dd>
               </div>
             </dl>
+
+            <StateActions
+              customerId={customer.id}
+              needHuman={state?.needHuman ?? false}
+              leadStage={state?.leadStage ?? 'NEW'}
+            />
           </div>
 
-          <AiSuggestionCard suggestion={latestSuggestion} rules={tenantConfig.rules} />
+          <AiSuggestionCard
+            suggestion={latestSuggestion}
+            rules={tenantConfig.rules}
+            actions={
+              latestSuggestion ? (
+                <SuggestionActions
+                  suggestionId={latestSuggestion.id}
+                  originalReply={latestSuggestion.reply}
+                  alreadySent={latestSuggestion.sentMessageId !== null}
+                  sentFinalReply={latestSuggestion.finalReply}
+                />
+              ) : null
+            }
+          />
         </div>
       </div>
     </div>
