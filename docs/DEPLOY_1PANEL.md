@@ -66,16 +66,12 @@ docker load -i zigoai-deploy-1.0.tar.gz
 docker network create zigoai-net
 
 # 3) 启动数据库（端口只绑到宿主机回环地址，公网访问不到）
-docker run -d --name zigoai-db --restart always --network zigoai-net \
-  -p 127.0.0.1:15432:5432 \
-  -e POSTGRES_USER=zigoai \
-  -e POSTGRES_PASSWORD=zigoai \
-  -e POSTGRES_DB=zigoai \
-  -v zigoai-pgdata:/var/lib/postgresql/data \
-  postgres:16
+#    ⚠️ 下面全部是**单行命令**：不要用反斜杠续行 —— Web 终端粘贴多行命令时会把换行合并成空格，
+#    导致 "syntax error near unexpected token `do'" 之类的报错，且整行都不会执行。
+docker run -d --name zigoai-db --restart always --network zigoai-net -p 127.0.0.1:15432:5432 -e POSTGRES_USER=zigoai -e POSTGRES_PASSWORD=zigoai -e POSTGRES_DB=zigoai -v zigoai-pgdata:/var/lib/postgresql/data postgres:16
 
-# 4) 等数据库就绪
-for i in $(seq 1 30); do docker exec zigoai-db pg_isready -U zigoai && break; sleep 2; done
+# 4) 等数据库就绪（同样是单行）
+sleep 8; docker exec zigoai-db pg_isready -U zigoai
 # 预期：/var/run/postgresql:5432 - accepting connections
 ```
 
@@ -84,45 +80,30 @@ for i in $(seq 1 30); do docker exec zigoai-db pg_isready -U zigoai && break; sl
 
 ---
 
-## 3. 写环境变量
+## 3. 生成会话密钥
 
 ```bash
-# 生成会话密钥（复制输出的那串十六进制）
 openssl rand -hex 32
-
-cat > /opt/zigoai/.env <<'EOF'
-DATABASE_URL="postgresql://zigoai:zigoai@zigoai-db:5432/zigoai"
-DEEPSEEK_API_KEY="把你自己在 DeepSeek 控制台创建的 Key 粘到这里"
-DEEPSEEK_BASE_URL="https://api.deepseek.com"
-DEEPSEEK_MODEL="deepseek-flash"
-DEEPSEEK_MODEL_PRO="deepseek-v4-pro"
-DEEPSEEK_TIMEOUT_MS="20000"
-DEEPSEEK_PRICE_IN_PER_MTOK="0"
-DEEPSEEK_PRICE_OUT_PER_MTOK="0"
-SESSION_SECRET="把上面 openssl rand 生成的串粘到这里"
-SEED_TOKEN="zigoai-demo-reset"
-MESSAGE_BATCH_WINDOW_MS="8000"
-FOLLOWUP_IDLE_MINUTES="2"
-FOLLOWUP_MAX_ATTEMPTS="2"
-EOF
-
-chmod 600 /opt/zigoai/.env
 ```
+
+复制输出的那串十六进制，下一步要用。**不需要手工创建 `.env` 文件** —— 环境变量在启动命令里用 `-e` 直接传入，避免多行 heredoc 在 Web 终端里被合并导致失败。
 
 > 数据库密码用纯字母数字 `zigoai`，避免 URL 编码问题；演示环境足够，生产请换强密码并同步改 `DATABASE_URL` 与 `POSTGRES_PASSWORD`。
 
 ---
 
-## 4. 启动应用
+## 4. 启动应用（单行命令）
+
+把 `sk-你的Key` 与 `那串密钥` 替换成真实值后，**整行复制粘贴**：
 
 ```bash
-docker run -d --name zigoai-mini --restart always --network zigoai-net \
-  -p 8080:3000 \
-  --env-file /opt/zigoai/.env \
-  zigoai-mini:1.0
+docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 -e DATABASE_URL="postgresql://zigoai:zigoai@zigoai-db:5432/zigoai" -e DEEPSEEK_API_KEY="sk-你的Key" -e DEEPSEEK_BASE_URL="https://api.deepseek.com" -e DEEPSEEK_MODEL="deepseek-flash" -e DEEPSEEK_MODEL_PRO="deepseek-v4-pro" -e SESSION_SECRET="那串密钥" -e SEED_TOKEN="zigoai-demo-reset" zigoai-mini:1.0
+```
 
-# 看启动日志（容器会**自动执行数据库迁移**）
-sleep 12 && docker logs --tail 25 zigoai-mini
+看启动日志（容器会**自动执行数据库迁移**）：
+
+```bash
+sleep 12; docker logs --tail 25 zigoai-mini
 ```
 
 **预期输出**（关键两行）：
@@ -130,6 +111,9 @@ sleep 12 && docker logs --tail 25 zigoai-mini
 [migrate] 共应用 4 个迁移
 ✓ Ready in 0ms
 ```
+
+> **生产环境建议**改用 `--env-file /opt/zigoai/.env`（密钥不进 shell 历史与 `docker inspect` 输出）。
+> 那时可以用 heredoc 创建文件，但注意 Web 终端会把多行粘贴合并成一行 —— 建议用 `nano /opt/zigoai/.env` 逐行编辑，或用多条 `echo 'K=V' >> /opt/zigoai/.env` 单行命令追加。
 
 ---
 
