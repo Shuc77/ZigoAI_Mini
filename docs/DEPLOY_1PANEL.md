@@ -121,6 +121,15 @@ sleep 12; docker logs --tail 25 zigoai-mini
 
 > **生产环境建议**改用 `--env-file /opt/zigoai/.env`（密钥不进 shell 历史与 `docker inspect` 输出）。
 > 那时可以用 heredoc 创建文件，但注意 Web 终端会把多行粘贴合并成一行 —— 建议用 `nano /opt/zigoai/.env` 逐行编辑，或用多条 `echo 'K=V' >> /opt/zigoai/.env` 单行命令追加。
+>
+> ⚠️ **`--env-file` 的值不要加引号**（真实上线时踩过）：
+> `docker run --env-file` **不会**像 Docker Compose 那样剥离引号，`DATABASE_URL="postgresql://..."` 会让容器里的值变成
+> `"postgresql://..."`（**引号是值的一部分**），于是迁移失败、容器退出、端口无人监听。
+> 正确写法是 `KEY=值` 不带引号。想确认，可以这样验证环境变量到底进去没有：
+>
+> ```bash
+> docker run --rm --env-file /opt/zigoai/.env zigoai-mini:1.1 node -e "console.log(JSON.stringify(process.env.DATABASE_URL))"
+> ```
 
 ---
 

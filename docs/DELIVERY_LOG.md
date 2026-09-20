@@ -827,6 +827,30 @@ errorMessage: Cannot convert argument to a ByteString because the character at i
 （`push declined due to repository rule violations`）。修正方式是改写提交（`--amend`）让密钥**从未进入历史**，
 并把文档里的所有密钥改为占位符。这条正好当作"AI 也会犯安全错误"的实例。
 
+**④ `Secure` Cookie 在 HTTP 站点上导致浏览器登录不进去（M5.1 修复）**
+会话 Cookie 的安全标记原本按 `NODE_ENV === 'production'` 决定，而线上是 `http://IP:8080`（无域名无证书）。
+带 `Secure` 的 Cookie **在 HTTP 下会被浏览器直接丢弃**（localhost 例外）：登录接口返回 200，
+但浏览器不保存 → 跳转 `/customers` 时服务端看不到会话 → 又回到登录页。症状就是"点登录没反应"。
+
+**最值得记的一点**：37 项自动化断言**全绿**却漏掉了它 —— 因为冒烟脚本用 Node 发请求，
+**Node 不在乎 `Secure` 标记照样保存并回传 Cookie**，只有真实浏览器才复现。
+这类"测试环境与真实客户端行为不一致"的 bug，是自动化测试的天然盲区。
+
+修复与加固：
+- `isSecureRequest(request)`：优先读显式配置 `COOKIE_SECURE`，否则按 `x-forwarded-proto` / 请求协议自动判定；
+- 冒烟脚本新增断言：**Cookie 的 Secure 标记必须与访问协议匹配**（HTTP 站点不该有、HTTPS 站点必须有），本地与线上都会检查；
+- 教训写进 README 的 Known Issues 与本节。
+
+**⑤ `docker run --env-file` 不会剥离引号（M5.2 修复）**
+把环境变量落成 `.env` 时我沿用了习惯写法 `KEY="值"`，但 `docker run --env-file` 与 Docker Compose 不同：
+它**不做引号剥离**，容器里拿到的值会带着字面双引号（实测 `"\"postgresql://...\""`）。
+后果是迁移连接失败 → 容器退出 → 端口无人监听，而 `curl -s` 把连接错误也吞掉，表现为"命令没输出"。
+
+排查路径（值得记住）：`docker ps -a` 看容器是否 Exited → `docker logs` 看迁移报错 →
+`docker run --rm --env-file X image node -e "console.log(JSON.stringify(process.env.K))"` 直接验证值到底长什么样。
+
+修复：`.env` 一律写成 `KEY=值`（不带引号）；文档中补充了该注意事项与自检命令。
+
 ## 4. 答辩话术
 
 **Q：为什么用 Docker？**
