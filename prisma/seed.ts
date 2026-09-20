@@ -211,7 +211,25 @@ function minutesAgo(n: number): Date {
   return new Date(Date.now() - n * 60_000);
 }
 
-async function main() {
+/**
+ * 演示种子数据的**唯一实现**。
+ *
+ * 两种调用方式：
+ *   1) 命令行：`pnpm db:seed`（本地开发 / 手工重置）
+ *   2) 服务端：`POST /api/admin/reset`（部署后容器内一键初始化，镜像里不必带 tsx）
+ * 因此这里导出 `runSeed()`，只在作为脚本直接运行时才自动执行（见文件末尾）。
+ */
+export type SeedSummary = {
+  tenants: number;
+  users: number;
+  customers: number;
+  messages: number;
+  accounts: Array<{ tenant: string; role: string; email: string }>;
+  runId: string;
+};
+
+export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedSummary> {
+  const log = options.silent ? () => {} : (...args: unknown[]) => console.log(...args);
   const passwordHash = await hashPassword(DEMO_PASSWORD);
 
   for (const seed of TENANTS) {
@@ -302,7 +320,7 @@ async function main() {
       });
     }
 
-    console.log(`[seed] ${seed.name}：${seed.customers.length} 个客户、${seed.users.length} 个账号`);
+    log(`[seed] ${seed.name}：${seed.customers.length} 个客户、${seed.users.length} 个账号`);
   }
 
   const [tenants, users, customers, messages] = await Promise.all([
@@ -312,24 +330,39 @@ async function main() {
     prisma.message.count(),
   ]);
 
-  console.log('');
-  console.log('[seed] 完成 —— 登录账号（密码统一 ' + DEMO_PASSWORD + '）：');
-  for (const seed of TENANTS) {
-    for (const user of seed.users) {
-      const label = user.role === 'MANAGER' ? '主管' : '销售';
-      console.log(`  ${seed.name.padEnd(8, '　')} ${label}  ${user.email}`);
-    }
+  const accounts = TENANTS.flatMap((seed) =>
+    seed.users.map((user) => ({
+      tenant: seed.name,
+      role: user.role === 'MANAGER' ? '主管' : '销售',
+      email: user.email,
+    })),
+  );
+
+  log('');
+  log(`[seed] 完成 —— 登录账号（密码统一 ${DEMO_PASSWORD}）：`);
+  for (const account of accounts) {
+    log(`  ${account.tenant.padEnd(8, '　')} ${account.role}  ${account.email}`);
   }
-  console.log('');
-  console.log(`[seed] 数据统计：租户 ${tenants}、用户 ${users}、客户 ${customers}、消息 ${messages}`);
-  console.log(`[seed] runId=${randomUUID().slice(0, 8)}`);
+  log('');
+  log(`[seed] 数据统计：租户 ${tenants}、用户 ${users}、客户 ${customers}、消息 ${messages}`);
+
+  return { tenants, users, customers, messages, accounts, runId: randomUUID().slice(0, 8) };
 }
 
-main()
-  .catch((error) => {
-    console.error('[seed] 失败：', error);
-    process.exit(1);
-  })
-  .finally(async () => {
-    await prisma.$disconnect();
-  });
+/**
+ * 仅当"作为脚本直接运行"时自动执行（`pnpm db:seed`）。
+ * 被 API 路由 import 时不会产生副作用 —— 这是把种子逻辑复用到容器里的前提。
+ */
+const invokedDirectly =
+  process.argv[1] !== undefined && /(^|[\\/])seed\.ts$/.test(process.argv[1]);
+
+if (invokedDirectly) {
+  runSeed()
+    .catch((error) => {
+      console.error('[seed] 失败：', error);
+      process.exit(1);
+    })
+    .finally(async () => {
+      await prisma.$disconnect();
+    });
+}

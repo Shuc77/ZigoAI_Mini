@@ -38,6 +38,12 @@ export const env = {
 
   sessionSecret: required('SESSION_SECRET'),
 
+  /**
+   * 演示数据重置接口的口令（`POST /api/admin/reset`）。
+   * 不配置则接口直接关闭 —— 生产环境不应默认暴露一个"清库重建"的入口。
+   */
+  seedToken: process.env.SEED_TOKEN ?? '',
+
   /** 连续消息聚合窗口：窗口内的多条客户消息算"一轮沟通"，只调一次 AI */
   batchWindowMs: num('MESSAGE_BATCH_WINDOW_MS', 8_000),
   /** 客户静默超过该分钟数即视为需要跟进 */

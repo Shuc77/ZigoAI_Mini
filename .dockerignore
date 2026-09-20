@@ -1,0 +1,23 @@
+# 构建上下文裁剪：这些内容绝不进入镜像
+node_modules
+.pnpm-store
+.next
+.git
+.github
+docs/_reference
+.localdb
+coverage
+*.log
+*.tsbuildinfo
+
+# 生成物：镜像内会重新生成，避免把本机（Windows）产物带进 Linux 镜像
+src/generated
+
+# 密钥：绝不进入镜像层
+.env
+.env.*
+!.env.example
+
+# 本地打好的镜像包
+*.tar
+*.tar.gz
