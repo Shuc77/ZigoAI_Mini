@@ -97,8 +97,15 @@ openssl rand -hex 32
 把 `sk-你的Key` 与 `那串密钥` 替换成真实值后，**整行复制粘贴**：
 
 ```bash
-docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 -e DATABASE_URL="postgresql://zigoai:zigoai@zigoai-db:5432/zigoai" -e DEEPSEEK_API_KEY="sk-你的Key" -e DEEPSEEK_BASE_URL="https://api.deepseek.com" -e DEEPSEEK_MODEL="deepseek-flash" -e DEEPSEEK_MODEL_PRO="deepseek-v4-pro" -e SESSION_SECRET="那串密钥" -e SEED_TOKEN="zigoai-demo-reset" zigoai-mini:1.0
+docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 -e DATABASE_URL="postgresql://zigoai:zigoai@zigoai-db:5432/zigoai" -e DEEPSEEK_API_KEY="<你的真实Key>" -e DEEPSEEK_BASE_URL="https://api.deepseek.com" -e DEEPSEEK_MODEL="deepseek-flash" -e DEEPSEEK_MODEL_PRO="deepseek-v4-pro" -e SESSION_SECRET="<上一步生成的密钥>" -e SEED_TOKEN="<自己生成的随机口令>" zigoai-mini:1.0
 ```
+
+> ⚠️ **两个必须替换、不能照抄的地方**（真实上线时踩过）：
+> 1. `DEEPSEEK_API_KEY` 若原样粘贴占位符，报错**不是**"Key 无效"，而是
+>    `Cannot convert argument to a ByteString because the character at index 10 has a value of 20320`
+>    —— 中文字符进不了 HTTP 头。识别特征：`ByteString` + 码点 > 255。
+> 2. `SEED_TOKEN` 不要用文档里的示例值：`/api/admin/reset` 是公网可达的，
+>    口令写在文档里等于公开。自己生成：`openssl rand -hex 16`。
 
 看启动日志（容器会**自动执行数据库迁移**）：
 
@@ -131,15 +138,15 @@ curl -s http://127.0.0.1:8080/api/health
 
 ---
 
-## 6. 写入演示数据（容器内一键）
+## 6. 写入演示数据（一键，幂等）
 
 ```bash
-curl -s -X POST -H "x-seed-token: zigoai-demo-reset" http://127.0.0.1:8080/api/admin/reset
+curl -s -X POST -H "x-seed-token: <你设置的SEED_TOKEN>" http://127.0.0.1:8080/api/admin/reset
 # 预期：{"ok":true,"summary":{"tenants":2,"users":4,"customers":6,"messages":18,...}}
 ```
 
-这个接口是**幂等**的：随时可以再调一次，把演示数据恢复干净（演示前建议先调一次）。
-出于安全，它只在配置了 `SEED_TOKEN` 时启用，且口令走请求头而不是 URL。
+这个接口是**幂等**的：随时可以再调一次，把演示数据恢复干净（**Demo 前建议先调一次**，因为冒烟测试会在"冒烟测试客户"名下累积测试消息）。
+出于安全，它只在配置了 `SEED_TOKEN` 时启用，口令走请求头而不是 URL；**不要把真实口令写进任何文档或仓库**。
 
 ---
 
