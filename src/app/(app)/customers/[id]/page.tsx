@@ -82,7 +82,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
               <span className="text-xs text-slate-400">{messages.length} 条</span>
             </div>
 
-            <div className="max-h-[520px] space-y-3 overflow-y-auto px-4 py-4">
+            <div className="h-[calc(100vh-27rem)] min-h-[320px] space-y-3 overflow-y-auto px-4 py-4">
               {messages.map((message) => {
                 const isCustomer = message.role === 'CUSTOMER';
                 return (
@@ -117,8 +117,13 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
           </div>
         </div>
 
-        {/* 右：Customer State（M2 起 AI 判断卡片会加在这里） */}
-        <div className="space-y-4">
+        {/*
+          右栏：独立滚动 + 吸顶。
+          为什么需要：客户状态、AI 判断、发送区都会随每轮对话增长（已发送/实际发送/系统修正等区块），
+          如果让整页跟着变长，聊到十几轮后右栏会长到需要一直滚动，体验很差。
+          现在两栏各自有固定高度：左栏聊聊天记录滚动，右栏独立滚动，页面高度基本恒定。
+        */}
+        <div className="space-y-4 lg:sticky lg:top-[81px] lg:max-h-[calc(100vh-105px)] lg:overflow-y-auto lg:pr-1">
           <div className="rounded-xl border border-slate-200 bg-white">
             <div className="border-b border-slate-100 px-4 py-3">
               <h2 className="text-sm font-medium">客户状态（Customer State）</h2>

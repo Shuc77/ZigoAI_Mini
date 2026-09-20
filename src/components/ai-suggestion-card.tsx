@@ -8,11 +8,15 @@ import { parseAdjustments } from '@/lib/agent/state';
  * 这张卡片是整个产品的核心界面 —— 销售看到的是判断 + 理由 + 可直接发送的话。
  */
 
-const STATUS_STYLES: Record<string, { label: string; className: string }> = {
-  SUCCESS: { label: '正常', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' },
-  RETRY_OK: { label: '重试后成功', className: 'border-sky-200 bg-sky-50 text-sky-700' },
-  FALLBACK: { label: '已降级为人工', className: 'border-amber-200 bg-amber-50 text-amber-700' },
-  ERROR: { label: '调用失败', className: 'border-rose-200 bg-rose-50 text-rose-700' },
+/**
+ * 徽章描述的是**这次 AI 调用本身的健康度**，不是"判断对不对"。
+ * （早期版本把它写成"正常"，会让人误以为在评价判断质量 —— 措辞必须说清边界。）
+ */
+const STATUS_STYLES: Record<string, { label: string; className: string; hint: string }> = {
+  SUCCESS: { label: '调用成功', className: 'border-emerald-200 bg-emerald-50 text-emerald-700', hint: '本次 AI 调用一次成功（不代表判断一定正确，判断质量请看下方依据）' },
+  RETRY_OK: { label: '重试后成功', className: 'border-sky-200 bg-sky-50 text-sky-700', hint: '首次调用不合格，带错误信息重试后成功' },
+  FALLBACK: { label: '已降级为人工', className: 'border-amber-200 bg-amber-50 text-amber-700', hint: 'AI 未能给出有效判断，已自动降级为人工跟进' },
+  ERROR: { label: '调用失败', className: 'border-rose-200 bg-rose-50 text-rose-700', hint: 'AI 调用失败' },
 };
 
 export function AiSuggestionCard({
@@ -48,11 +52,15 @@ export function AiSuggestionCard({
   const adjustments = parseAdjustments(suggestion.stateAdjustments);
   const ruleById = new Map(rules.map((rule) => [rule.id, rule.text]));
 
+  // AI 原始建议 vs 系统采纳：把落差就地展示，避免"看起来自相矛盾"
+  const stageAdjustment = adjustments.find((a) => a.field === 'lead_stage');
+  const humanAdjustment = adjustments.find((a) => a.field === 'need_human');
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
       <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
         <h2 className="text-sm font-medium">AI 判断</h2>
-        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${status.className}`}>
+        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${status.className}`} title={status.hint}>
           {status.label}
         </span>
       </div>
@@ -101,6 +109,11 @@ export function AiSuggestionCard({
             <dd className="mt-0.5 font-medium text-slate-900">
               {LEAD_STAGE_LABELS[suggestion.leadStage]}
             </dd>
+            {stageAdjustment ? (
+              <dd className="mt-0.5 text-[10px] text-amber-700">
+                AI 原建议「{LEAD_STAGE_LABELS[stageAdjustment.suggested as keyof typeof LEAD_STAGE_LABELS] ?? stageAdjustment.suggested}」被系统拦住
+              </dd>
+            ) : null}
           </div>
           <div className="rounded-lg bg-slate-50 px-2.5 py-2">
             <dt className="text-slate-500">下一步动作</dt>

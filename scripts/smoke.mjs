@@ -494,5 +494,9 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
 }
 
 // --- 汇总 ------------------------------------------------------------------
-console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项\n`);
+console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项`);
+if (failed === 0 && /127\.0\.0\.1|localhost/.test(baseUrl)) {
+  console.log('[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。演示前执行 `pnpm db:seed` 可重置演示数据（该客户也会被清除）。');
+}
+console.log('');
 process.exit(failed === 0 ? 0 : 1);
