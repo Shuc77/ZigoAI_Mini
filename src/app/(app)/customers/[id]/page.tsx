@@ -74,11 +74,19 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
         </div>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      {/*
+        两栏等高布局。
+        为什么：左栏（聊天）与右栏（状态 + AI 判断 + 发送区）内容都会随对话增长，
+        如果各自算高度，就会出现"一个已经到底、另一个还在滚"的错位，页面还会多出第三条滚动条。
+        做法：给栅格一个确定的视口高度，栅格项默认 stretch → 两栏严格等高；
+        左栏卡片内部用 flex 分配（聊天区 flex-1 吸收剩余高度），右栏整体独立滚动。
+        窄屏不加固定高度，自动退回单列堆叠。
+      */}
+      <div className="grid gap-4 lg:h-[calc(100vh-17rem)] lg:min-h-[540px] lg:grid-cols-3">
         {/* 左：聊天记录 + 录入 */}
-        <div className="lg:col-span-2">
-          <div className="rounded-xl border border-slate-200 bg-white">
-            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+        <div className="min-h-0 lg:col-span-2">
+          <div className="flex h-full flex-col rounded-xl border border-slate-200 bg-white">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-100 px-4 py-3">
               <h2 className="text-sm font-medium">聊天记录</h2>
               <span className="text-xs text-slate-400">{messages.length} 条</span>
             </div>
@@ -92,7 +100,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
               }))}
             />
 
-            <div className="border-t border-slate-100 px-4 py-3">
+            <div className="shrink-0 border-t border-slate-100 px-4 py-3">
               <MessageComposer customerId={customer.id} />
             </div>
           </div>
@@ -104,7 +112,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
           如果让整页跟着变长，聊到十几轮后右栏会长到需要一直滚动，体验很差。
           现在两栏各自有固定高度：左栏聊聊天记录滚动，右栏独立滚动，页面高度基本恒定。
         */}
-        <div className="space-y-4 lg:sticky lg:top-[81px] lg:max-h-[calc(100vh-105px)] lg:overflow-y-auto lg:pr-1">
+        <div className="min-h-0 space-y-4 lg:h-full lg:overflow-y-auto lg:pr-1">
           <div className="rounded-xl border border-slate-200 bg-white">
             <div className="border-b border-slate-100 px-4 py-3">
               <h2 className="text-sm font-medium">客户状态（Customer State）</h2>

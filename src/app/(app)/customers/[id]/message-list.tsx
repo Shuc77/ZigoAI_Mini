@@ -14,11 +14,11 @@ export type ChatMessage = {
 /**
  * 聊天记录列表。
  *
- * 为什么要做成客户端组件：需要"粘底"滚动行为 —— 新消息到达后自动滚到最新一条。
- * 规则（避免打断正在翻历史的用户）：
- *   1) 首次渲染一定滚到底部；
- *   2) 之后只有"用户本来就在底部附近"时才自动跟随；
- *   3) 用户主动往上翻后停止跟随，并出现「回到最新」按钮。
+ * 两个职责：
+ *  1) **布局**：作为左栏卡片中的弹性区域（`flex-1`），把剩余高度全部吃掉 ——
+ *     这样左栏卡片的总高度由外层栅格决定，与右栏严格等高。
+ *     窄屏（无固定高度）时退化为 `max-h-[70vh]` 的内部滚动，避免页面被聊天记录撑爆。
+ *  2) **粘底滚动**：新消息到达后自动滚到最新一条，但**不打断**正在往上翻历史的用户。
  */
 export function MessageList({ messages }: { messages: ChatMessage[] }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -60,11 +60,11 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
   }
 
   return (
-    <div className="relative">
+    <div className="relative flex flex-col lg:min-h-0 lg:flex-1">
       <div
         ref={containerRef}
         onScroll={handleScroll}
-        className="h-[calc(100vh-27rem)] min-h-[320px] space-y-3 overflow-y-auto px-4 py-4"
+        className="min-h-[280px] max-h-[70vh] space-y-3 overflow-y-auto px-4 py-4 lg:max-h-none lg:min-h-0 lg:flex-1"
       >
         {messages.map((message) => {
           const isCustomer = message.role === 'CUSTOMER';
