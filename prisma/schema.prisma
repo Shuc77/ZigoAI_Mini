@@ -59,6 +59,9 @@ model Tenant {
   tone      String
   /// 明确禁止的事项，例如 ["承诺具体优惠", "承诺疗效"]
   forbidden Json
+  /// 交接规则：什么情况必须交给人工（触发条件 / 敏感词 / 金额阈值）。
+  /// 早期版本把这些硬编码在 prompt 与状态机里，但不同企业的转人工标准必然不同。
+  handoff   Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

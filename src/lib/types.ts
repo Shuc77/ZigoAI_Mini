@@ -109,6 +109,7 @@ export function isManager(ctx: AuthContext): boolean {
 // ---------------------------------------------------------------------------
 export const RULE_GUARDS = [
   'FORBID_QUOTE_BEFORE_INTEREST',
+  'FORBID_ABSOLUTE_PROMISE',
   'REQUIRE_DOC_REQUEST_ON_DEVICE_INTENT',
 ] as const;
 export type RuleGuard = (typeof RULE_GUARDS)[number];
@@ -144,4 +145,77 @@ export function parseTenantRules(value: unknown): TenantRules {
 export function parseStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string');
+}
+
+// ---------------------------------------------------------------------------
+// 交接规则（handoff）：什么情况必须交给人
+//
+// 早期版本把"投诉/要求真人/AI 不确定/高价值/规则红线"硬编码在 prompt 与状态机里，
+// 但不同企业的转人工标准必然不同（高客单行业"问价"就该转人工，快消行业"问价"是日常），
+// 因此它必须成为企业级配置。
+// ---------------------------------------------------------------------------
+export type HandoffTriggers = {
+  /** 客户投诉或情绪明显不满 */
+  complaint: boolean;
+  /** 客户明确要求真人 / 要求电话沟通 */
+  wantsHuman: boolean;
+  /** AI 无法确认答案，或涉及企业未给出的政策 */
+  aiUnsure: boolean;
+  /** 出现明确成交信号（要签约、付款、发票） */
+  highValue: boolean;
+  /** 触发企业规则红线（规则守护判定违规） */
+  ruleConflict: boolean;
+};
+
+export type HandoffConfig = {
+  triggers: HandoffTriggers;
+  /** 命中即转人工的敏感词（行业差异极大，例如保险的"起诉/监管"、教培的"退费/曝光"） */
+  keywords: string[];
+  /** 涉及金额达到该阈值（元）即转人工；null 表示不按金额判断 */
+  amountThreshold: number | null;
+  /** 给模型看的一句话说明 */
+  note: string;
+};
+
+export const DEFAULT_HANDOFF: HandoffConfig = {
+  triggers: {
+    complaint: true,
+    wantsHuman: true,
+    aiUnsure: true,
+    highValue: true,
+    ruleConflict: true,
+  },
+  keywords: [],
+  amountThreshold: null,
+  note: '',
+};
+
+export function parseHandoff(value: unknown): HandoffConfig {
+  if (typeof value !== 'object' || value === null) return DEFAULT_HANDOFF;
+  const record = value as Record<string, unknown>;
+  const triggersRecord =
+    typeof record.triggers === 'object' && record.triggers !== null
+      ? (record.triggers as Record<string, unknown>)
+      : {};
+
+  const bool = (key: keyof HandoffTriggers): boolean =>
+    typeof triggersRecord[key] === 'boolean'
+      ? (triggersRecord[key] as boolean)
+      : DEFAULT_HANDOFF.triggers[key];
+
+  return {
+    triggers: {
+      complaint: bool('complaint'),
+      wantsHuman: bool('wantsHuman'),
+      aiUnsure: bool('aiUnsure'),
+      highValue: bool('highValue'),
+      ruleConflict: bool('ruleConflict'),
+    },
+    keywords: parseStringList(record.keywords),
+    amountThreshold:
+      typeof record.amountThreshold === 'number' && Number.isFinite(record.amountThreshold)
+        ? record.amountThreshold
+        : null,
+    note: typeof record.note === 'string' ? record.note : '',
+  };
 }

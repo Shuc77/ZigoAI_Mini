@@ -493,7 +493,157 @@ console.log('\n核心任务 4 · 销售回复与人工操作');
   }
 }
 
-// --- 汇总 ------------------------------------------------------------------
+// --- 7. 核心任务 5：企业规则与交接规则 --------------------------------------
+console.log('\n核心任务 5 · 企业规则与交接规则');
+{
+  const lemengCookie = sessions['sales@lemeng.demo'];
+  const jixieCookie = sessions['sales@jixie.demo'];
+
+  const lemengCustomers = await fetch(`${baseUrl}/api/customers`, { headers: { cookie: lemengCookie } }).then((r) => r.json());
+  const jixieCustomers = await fetch(`${baseUrl}/api/customers`, { headers: { cookie: jixieCookie } }).then((r) => r.json());
+
+  const lemengTarget = (lemengCustomers.customers ?? []).find((c) => c.handle === 'smoke_test_handle');
+  const jixieTarget = (jixieCustomers.customers ?? [])[0];
+
+  const LEMENG_RULE = '客户尚未表达明确兴趣前，不主动报价';
+  const JIXIE_RULE = '确认客户存在设备与保险需求后，优先索取行驶证照片';
+
+  // 7.1 规则是否按租户注入 prompt（确定性断言：直接看原始请求）
+  if (lemengTarget && jixieTarget) {
+    const lemengRun = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+      body: JSON.stringify({ content: '你们平时怎么上课的？', clientMessageId: `smoke-rules-lemeng-${Date.now()}` }),
+    }).then((r) => r.json());
+
+    const jixieRun = await fetch(`${baseUrl}/api/customers/${jixieTarget.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: jixieCookie },
+      body: JSON.stringify({ content: '你们那边设备保险怎么办的？', clientMessageId: `smoke-rules-jixie-${Date.now()}` }),
+    }).then((r) => r.json());
+
+    const lemengPrompt = JSON.stringify(lemengRun.suggestion?.rawRequest ?? {});
+    const jixiePrompt = JSON.stringify(jixieRun.suggestion?.rawRequest ?? {});
+
+    if (lemengPrompt.includes(LEMENG_RULE) && !lemengPrompt.includes(JIXIE_RULE)) {
+      ok('乐蒙的判断只注入了乐蒙的规则', '未串入机械之家的规则');
+    } else {
+      fail('乐蒙规则注入不正确', `含自家规则=${lemengPrompt.includes(LEMENG_RULE)} 含他家规则=${lemengPrompt.includes(JIXIE_RULE)}`);
+    }
+
+    if (jixiePrompt.includes(JIXIE_RULE) && !jixiePrompt.includes(LEMENG_RULE)) {
+      ok('机械之家的判断只注入了机械之家的规则', '未串入乐蒙的规则');
+    } else {
+      fail('机械之家规则注入不正确', `含自家规则=${jixiePrompt.includes(JIXIE_RULE)} 含他家规则=${jixiePrompt.includes(LEMENG_RULE)}`);
+    }
+
+    // 7.2 交接规则（企业级配置）是否注入 prompt：两家的金额阈值不同
+    if (lemengPrompt.includes('5000') && jixiePrompt.includes('1000')) {
+      ok('交接规则的金额阈值按企业注入', '乐蒙 5000 元 / 机械之家 1000 元');
+    } else {
+      fail('交接规则未按企业注入', `乐蒙含5000=${lemengPrompt.includes('5000')}, 机械含1000=${jixiePrompt.includes('1000')}`);
+    }
+  }
+
+  // 7.3 交接规则的确定性兜底：金额阈值与敏感词命中必定转人工
+  if (lemengTarget) {
+    const overThreshold = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+      body: JSON.stringify({ content: '年卡 6800 元能便宜点吗？', clientMessageId: `smoke-handoff-over-${Date.now()}` }),
+    }).then((r) => r.json());
+
+    const overNotes = (overThreshold.handoffNotes ?? []).join(' ');
+    if (overNotes.includes('阈值')) {
+      ok('金额超阈值触发交接规则', overNotes.slice(0, 60));
+    } else {
+      fail('金额阈值未生效', JSON.stringify(overThreshold.handoffNotes ?? []));
+    }
+  }
+
+  if (lemengTarget) {
+    const keywordHit = await fetch(`${baseUrl}/api/customers/${lemengTarget.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+      body: JSON.stringify({ content: '这个课我不上了，我要退费！', clientMessageId: `smoke-handoff-keyword-${Date.now()}` }),
+    }).then((r) => r.json());
+
+    const keywordNotes = (keywordHit.handoffNotes ?? []).join(' ');
+    if (keywordNotes.includes('敏感词')) {
+      ok('命中企业敏感词触发交接规则', keywordNotes.slice(0, 60));
+    } else {
+      fail('敏感词未生效', JSON.stringify(keywordHit.handoffNotes ?? []));
+    }
+  }
+
+  // 7.4 交接规则是"企业级配置"：机械之家阈值更低，同样的金额在那边会转人工
+  if (jixieTarget) {
+    const jixieRun = await fetch(`${baseUrl}/api/customers/${jixieTarget.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: jixieCookie },
+      body: JSON.stringify({ content: '保费大概 1500 元够吗？', clientMessageId: `smoke-handoff-jixie-${Date.now()}` }),
+    }).then((r) => r.json());
+
+    const jixieNotes = (jixieRun.handoffNotes ?? []).join(' ');
+    if (jixieNotes.includes('阈值')) {
+      ok('同一金额在机械之家触发转人工', '因其阈值仅 1000 元（企业差异可见）');
+    } else {
+      fail('机械之家的金额阈值未生效', JSON.stringify(jixieRun.handoffNotes ?? []));
+    }
+  }
+
+  // 7.5 权限：销售不能改企业规则，主管可以
+  const salesAttempt = await fetch(`${baseUrl}/api/tenant/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+    body: JSON.stringify({
+      salesGoal: 'x',
+      tone: 'x',
+      rules: [],
+      forbidden: [],
+      handoff: {
+        triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true },
+        keywords: [],
+        amountThreshold: null,
+        note: '',
+      },
+    }),
+  });
+  if (salesAttempt.status === 403) {
+    ok('销售无法修改企业规则', 'HTTP 403');
+  } else {
+    fail('销售竟然可以修改企业规则', `HTTP ${salesAttempt.status}`);
+  }
+
+  const baselineConfig = await fetch(`${baseUrl}/api/tenant/config`, { headers: { cookie: lemengCookie } });
+  if (baselineConfig.status === 200) {
+    ok('可读取本企业规则配置', '含销售规则与交接规则');
+  } else {
+    fail('读取企业配置失败', `HTTP ${baselineConfig.status}`);
+  }
+
+  // 7.6 规则试跑对比：把金额阈值改小 → 同一句话的判断随之改变（且不落库）
+  if (lemengTarget) {
+    const config = (await baselineConfig.json()).config;
+    const draft = {
+      ...config,
+      handoff: { ...config.handoff, amountThreshold: 100 },
+    };
+
+    const trial = await fetch(`${baseUrl}/api/tenant/config/trial-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie: lemengCookie },
+      body: JSON.stringify({ customerId: lemengTarget.id, message: '学费 800 元可以吗？', draft }),
+    });
+    const trialBody = await trial.json();
+
+    if (trial.status === 200 && trialBody.draft?.handoffNotes?.join(' ').includes('阈值')) {
+      ok('规则试跑对比生效', '草稿把阈值改为 100 元后，800 元即触发转人工');
+    } else {
+      fail('规则试跑对比失败', `HTTP ${trial.status} ${JSON.stringify(trialBody).slice(0, 120)}`);
+    }
+  }
+}
 console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项`);
 if (failed === 0 && /127\.0\.0\.1|localhost/.test(baseUrl)) {
   console.log('[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。演示前执行 `pnpm db:seed` 可重置演示数据（该客户也会被清除）。');

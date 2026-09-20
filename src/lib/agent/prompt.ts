@@ -4,6 +4,7 @@ import {
   HUMAN_REASONS,
   LEAD_STAGE_LABELS,
   NEXT_ACTIONS,
+  type HandoffConfig,
   type TenantRules,
 } from '@/lib/types';
 import { AGENT_OUTPUT_EXAMPLE } from './schema';
@@ -37,6 +38,8 @@ export type PromptContext = {
     tone: string;
     rules: TenantRules;
     forbidden: string[];
+    /** 交接规则：什么情况必须交给人工（企业级配置，不再是硬编码） */
+    handoff: HandoffConfig;
   };
   customer: {
     name: string;
@@ -86,6 +89,37 @@ function renderRules(rules: TenantRules): string {
   return rules.map((rule) => `${rule.id}. ${rule.text}`).join('\n');
 }
 
+/**
+ * 交接规则注入（企业级配置）。
+ * 这里只做"引导"；真正决定本轮是否转人工的是 src/lib/agent/handoff.ts 的确定性执行 ——
+ * 两者都要有：提示词负责让模型的判断尽量贴近企业标准，代码负责兜住红线。
+ */
+function renderHandoff(handoff: HandoffConfig): string {
+  const lines: string[] = [];
+  const mark = (enabled: boolean) => (enabled ? '✔ 需要人工介入' : '✘ 本企业不因此转人工');
+
+  lines.push(`- 客户投诉或情绪明显不满：${mark(handoff.triggers.complaint)}`);
+  lines.push(`- 客户明确要求真人 / 要求电话沟通：${mark(handoff.triggers.wantsHuman)}`);
+  lines.push(`- 你无法确认答案，或涉及企业未给出的政策：${mark(handoff.triggers.aiUnsure)}`);
+  lines.push(`- 出现明确成交信号（要签约 / 付款 / 发票）：${mark(handoff.triggers.highValue)}`);
+  lines.push(`- 触发企业规则红线：${mark(handoff.triggers.ruleConflict)}`);
+
+  if (handoff.keywords.length > 0) {
+    lines.push(`- 客户消息中出现以下任一敏感词，直接转人工：${handoff.keywords.join('、')}`);
+  }
+  if (handoff.amountThreshold !== null) {
+    lines.push(`- 对话涉及金额达到或超过 ${handoff.amountThreshold} 元时，转人工（高客单业务需人工核价/核保）`);
+  }
+  if (handoff.note) {
+    lines.push(`- 补充说明：${handoff.note}`);
+  }
+
+  lines.push('');
+  lines.push('不在以上范围内的情形，不要建议人工介入（企业希望尽量由销售自动跟进）。');
+
+  return lines.join('\n');
+}
+
 function renderHistory(messages: PromptMessage[]): string {
   if (messages.length === 0) return '（无历史对话）';
   return messages
@@ -127,13 +161,9 @@ ${Object.entries(STAGE_GUIDE)
 
 3) 下一步动作（next_action）只能取：${NEXT_ACTIONS.join(' / ')}。
 
-4) 是否建议人工介入（need_human）为 true 的典型情形：
-   - 客户投诉、情绪明显不满
-   - 客户明确要求真人/要求电话沟通
-   - 你无法确认答案，或答案会涉及企业未给出的政策
-   - 出现明确成交信号（要签约、要付款、要发票）
-   - 触发了上面企业规则中的红线
-   并请在 human_reason 中给出原因，取值只能来自：${HUMAN_REASONS.join(' / ')}。
+4) 是否建议人工介入（need_human）按**本企业的交接规则**判断：
+${renderHandoff(tenant.handoff)}
+   当 need_human 为 true 时，请在 human_reason 中给出原因，取值只能来自：${HUMAN_REASONS.join(' / ')}。
 
 5) reply 是"销售可以直接发出去的一句话"，要求：
    - 符合企业语气，口语化，约 80 字以内，不要分点罗列

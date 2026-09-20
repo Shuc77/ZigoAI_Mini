@@ -3,29 +3,37 @@ import type { AiSuggestion, SuggestionStatus } from '@/generated/prisma/client';
 import { estimateCostCny, env } from '@/lib/env';
 import { prisma } from '@/lib/db';
 import { HttpError } from '@/lib/errors';
-import { parseStringList, parseTenantRules, type AuthContext } from '@/lib/types';
+import {
+  parseHandoff,
+  parseStringList,
+  parseTenantRules,
+  type AuthContext,
+  type TenantRules,
+} from '@/lib/types';
 import { requireCustomer } from '@/server/repositories/customers';
+import { checkRuleGuards, type GuardViolation } from './guards';
+import { applyHandoffPolicy } from './handoff';
 import { parseLooseJson } from './json';
 import { callDeepSeekJson, type LlmResult } from './llm';
 import { buildAgentPrompt, HISTORY_LIMIT, PROMPT_VERSION, type PromptContext } from './prompt';
 import { buildAgentOutputSchema, type AgentOutput } from './schema';
-import { computeStateTransition, type StateAdjustment } from './state';
+import { computeStageTransition, type StateAdjustment } from './state';
 
 /**
  * AI Sales Agent 主干 pipeline。
  *
- * 一次调用的完整链路（这也是 README「AI Pipeline」那一节要讲的东西）：
+ * 一次调用的完整链路（README「AI Pipeline」章节讲的就是这里）：
  *
- *   载入上下文（租户规则 + 客户 + 旧状态 + 历史消息 + 本轮新消息）
- *     → 组装 prompt
- *     → 调 DeepSeek（json_object）
- *     → 宽松解析 + zod 严格校验
- *     → 不合格就带着错误信息重试一次（预算不足则加大预算）
- *     → 仍不合格 → 降级为"转人工"的兜底建议（**绝不把脏数据写库，也绝不让页面崩**）
- *     → 状态机裁决（AI 建议 vs 系统采纳）
- *     → 事务落库：写 AiSuggestion（含原始请求/响应/token/成本）+ 乐观锁更新 CustomerState
+ *   ① 载入上下文（租户规则 + 交接规则 + 客户 + 旧状态 + 历史消息 + 本轮新消息）
+ *   ② 组装 prompt（规则编号注入、交接标准注入、输出契约、安全边界）
+ *   ③ 调 DeepSeek（json_object）→ 宽松解析 → zod 严格校验
+ *   ④ 状态机裁决阶段（终态保护、不回退）
+ *   ⑤ 规则守护：确定性校验回复是否违反企业红线
+ *        违规 → 把违规原因回灌重写一次 → 仍违规 → 标记 + 强制转人工
+ *   ⑥ 交接规则：按企业配置确定性决定"本轮是否需要人工"（敏感词、金额阈值、关闭的触发条件）
+ *   ⑦ 事务落库：写 AiSuggestion（含原始请求/响应/token/成本/全部修正记录）+ 乐观锁更新 CustomerState
  *
- * 六个进阶钩子都挂在这条主干上（聚合窗口在入口、规则守护在校验之后、Follow-up 复用本函数）。
+ * 六个进阶钩子都挂在这条主干上（聚合窗口在入口、Follow-up 复用本函数）。
  */
 
 export type AgentTrigger = 'NEW_MESSAGE' | 'REGENERATE' | 'FOLLOW_UP';
@@ -39,12 +47,24 @@ export type RunAgentInput = {
   trigger?: AgentTrigger;
   /** 销售点「深度重判」时用更强的模型 */
   useProModel?: boolean;
-  /** 额外指令：规则守护发现违规后的重写要求 */
+  /** 额外指令：人工指定的补充要求 */
   extraInstruction?: string;
+  /** 试跑模式：只判断、不落库（用于"改规则前先看效果"的对照实验） */
+  dryRun?: boolean;
+  /** 试跑时注入一条"假设客户消息"（不落库），用于同一句话在新旧规则下的 A/B 对比 */
+  dryRunMessage?: string;
+  /** 试跑时用这套规则替换数据库里的规则（不写库） */
+  ruleOverride?: {
+    rules: TenantRules;
+    handoff: ReturnType<typeof parseHandoff>;
+    tone?: string;
+    salesGoal?: string;
+    forbidden?: string[];
+  };
 };
 
 export type RunAgentResult = {
-  suggestion: AiSuggestion;
+  suggestion: AiSuggestion | DraftSuggestion;
   adjustments: StateAdjustment[];
   state: {
     before: { leadStage: string; intent: string; needHuman: boolean; version: number };
@@ -52,18 +72,39 @@ export type RunAgentResult = {
   };
   status: SuggestionStatus;
   attempts: number;
+  guardViolations: GuardViolation[];
+  handoffNotes: string[];
+  persisted: boolean;
+};
+
+/** 试跑模式返回的草稿（未落库，因此没有数据库生成的字段） */
+export type DraftSuggestion = {
+  id: string;
+  customerIntent: string;
+  intentDetail: string | null;
+  leadStage: AgentOutput['lead_stage'];
+  nextAction: string;
+  reply: string;
+  reason: string;
+  needHuman: boolean;
+  humanReason: string | null;
+  rulesApplied: string[];
+  ruleViolation: string | null;
+  status: SuggestionStatus;
+  model: string;
 };
 
 const MAX_ATTEMPTS = 2;
 const BASE_MAX_TOKENS = 1024;
-/** 截断时翻倍预算的上限，防止异常情况下烧钱 */
 const MAX_TOKENS_CEILING = 4096;
+/** 规则守护违规后允许的回灌重写次数 */
+const MAX_GUARD_RETRIES = 1;
 
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const trigger: AgentTrigger = input.trigger ?? 'NEW_MESSAGE';
   const { ctx, customerId } = input;
 
-  // ---------- 1) 载入上下文（全部强制租户作用域） ----------
+  // ---------- ① 载入上下文（全部强制租户作用域） ----------
   const customer = await requireCustomer(ctx, customerId);
 
   const tenantRecord = await prisma.tenant.findUnique({ where: { id: ctx.tenantId } });
@@ -78,12 +119,23 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     version: 0,
   };
 
+  const tenantRules = input.ruleOverride?.rules ?? parseTenantRules(tenantRecord.rules);
+  const handoffConfig = input.ruleOverride?.handoff ?? parseHandoff(tenantRecord.handoff);
+
   const newMessages = input.messageIds?.length
     ? await prisma.message.findMany({
         where: { tenantId: ctx.tenantId, customerId, id: { in: input.messageIds } },
         orderBy: { createdAt: 'asc' },
       })
     : [];
+
+  // 试跑注入的"假设客户消息"：参与判断与交接规则检测，但不写库
+  const effectiveNewMessages: Array<{ role: 'CUSTOMER' | 'SALES'; content: string; createdAt: Date }> = [
+    ...newMessages.map((m) => ({ role: m.role, content: m.content, createdAt: m.createdAt })),
+    ...(input.dryRunMessage
+      ? [{ role: 'CUSTOMER' as const, content: input.dryRunMessage, createdAt: new Date() }]
+      : []),
+  ];
 
   const historyRows = await prisma.message.findMany({
     where: {
@@ -95,13 +147,14 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     take: HISTORY_LIMIT,
   });
 
-  const promptContext: PromptContext = {
+  const basePromptContext: PromptContext = {
     tenant: {
       name: tenantRecord.name,
-      salesGoal: tenantRecord.salesGoal,
-      tone: tenantRecord.tone,
-      rules: parseTenantRules(tenantRecord.rules),
-      forbidden: parseStringList(tenantRecord.forbidden),
+      salesGoal: input.ruleOverride?.salesGoal ?? tenantRecord.salesGoal,
+      tone: input.ruleOverride?.tone ?? tenantRecord.tone,
+      rules: tenantRules,
+      forbidden: input.ruleOverride?.forbidden ?? parseStringList(tenantRecord.forbidden),
+      handoff: handoffConfig,
     },
     customer: {
       name: customer.name,
@@ -121,50 +174,158 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
       content: m.content,
       createdAt: m.createdAt,
     })),
-    newMessages: newMessages.map((m) => ({ role: m.role, content: m.content, createdAt: m.createdAt })),
+    newMessages: effectiveNewMessages.map((m) => ({ role: m.role, content: m.content, createdAt: m.createdAt })),
     trigger,
     extraInstruction: input.extraInstruction,
   };
 
-  const { system, user } = buildAgentPrompt(promptContext);
-
-  // ---------- 2) 调用 + 校验 + 重试 + 降级 ----------
+  // ---------- ②③ 调用 + 校验（含规则守护回灌重试） ----------
   const model = input.useProModel ? env.deepseekModelPro : env.deepseekModel;
-  const outcome = await callWithValidation({
-    system,
-    user,
-    model,
-    label: `${trigger}:${customer.id.slice(0, 6)}`,
-    fallbackStage: currentState.leadStage,
+  let extraInstruction = input.extraInstruction;
+  let outcome: ValidationOutcome | null = null;
+  let stageTransition = computeStageTransition(
+    { leadStage: currentState.leadStage, intent: currentState.intent },
+    { lead_stage: currentState.leadStage } as AgentOutput,
+  );
+  let guardViolations: GuardViolation[] = [];
+  let guardRetries = 0;
+
+  for (;;) {
+    const { system, user } = buildAgentPrompt({ ...basePromptContext, extraInstruction });
+
+    outcome = await callWithValidation({
+      system,
+      user,
+      model,
+      label: `${trigger}:${customer.id.slice(0, 6)}${input.dryRun ? ':dry' : ''}`,
+      fallbackStage: currentState.leadStage,
+    });
+
+    // ④ 状态机：阶段裁决（终态保护 / 不回退）
+    stageTransition = computeStageTransition(
+      { leadStage: currentState.leadStage, intent: currentState.intent },
+      outcome.output,
+    );
+
+    // ⑤ 规则守护：确定性校验回复是否踩了企业红线
+    guardViolations =
+      outcome.status === 'FALLBACK'
+        ? []
+        : checkRuleGuards({
+            rules: tenantRules,
+            stage: stageTransition.next.leadStage,
+            reply: outcome.output.reply,
+            nextAction: outcome.output.next_action,
+          });
+
+    if (guardViolations.length > 0 && guardRetries < MAX_GUARD_RETRIES) {
+      guardRetries += 1;
+      extraInstruction = [
+        input.extraInstruction,
+        ...guardViolations.map((v) => `【违反企业规则 ${v.ruleId}】${v.instruction}`),
+      ]
+        .filter(Boolean)
+        .join('\n');
+      continue;
+    }
+
+    break;
+  }
+
+  if (!outcome) throw new Error('AI 调用未产生结果');
+
+  // ---------- ⑥ 交接规则：本轮是否需要人工 ----------
+  const handoff = applyHandoffPolicy({
+    config: handoffConfig,
+    customerMessages: effectiveNewMessages.filter((m) => m.role === 'CUSTOMER').map((m) => m.content),
+    aiNeedHuman: outcome.output.need_human,
+    aiHumanReason: outcome.output.human_reason ?? null,
+    aiNextAction: outcome.output.next_action,
+    guardViolations,
   });
 
-  // ---------- 3) 状态机裁决 ----------
-  const transition = computeStateTransition(
-    {
-      leadStage: currentState.leadStage,
-      intent: currentState.intent,
-      needHuman: currentState.needHuman,
-      humanReason: currentState.humanReason,
-    },
-    outcome.output,
-  );
+  // 历史粘性：已标记需人工的客户，只有人工能解除（AI 与配置都不能自动清掉）
+  const stickyNeedHuman = currentState.needHuman;
+  const finalNeedHuman = stickyNeedHuman || handoff.needHuman;
+  const finalHumanReason = handoff.needHuman
+    ? handoff.humanReason
+    : stickyNeedHuman
+      ? currentState.humanReason
+      : null;
 
-  // ---------- 4) 事务落库（建议 + 状态，带乐观锁重试） ----------
+  const adjustments: StateAdjustment[] = [...stageTransition.adjustments, ...handoff.adjustments];
+  if (stickyNeedHuman && !handoff.needHuman) {
+    adjustments.push({
+      field: 'need_human',
+      suggested: 'false',
+      adopted: 'true',
+      rule: 'HUMAN_FLAG_STICKY',
+      note: '已标记需人工介入的客户，需人工处理完成后解除（AI 与企业规则都不会自动清除）',
+    });
+  }
+
+  const ruleViolation = guardViolations.length > 0
+    ? guardViolations.map((v) => `${v.ruleId}：${v.message}`).join('；')
+    : null;
+
+  const finalState = {
+    leadStage: stageTransition.next.leadStage,
+    intent: stageTransition.next.intent,
+    needHuman: finalNeedHuman,
+    humanReason: finalHumanReason,
+  };
+
+  // ---------- ⑦ 落库（或试跑直接返回草稿） ----------
+  if (input.dryRun) {
+    return {
+      suggestion: {
+        id: 'dry-run',
+        customerIntent: outcome.output.customer_intent,
+        intentDetail: outcome.output.intent_detail || null,
+        leadStage: finalState.leadStage,
+        nextAction: handoff.nextAction,
+        reply: outcome.output.reply,
+        reason: outcome.output.reason,
+        needHuman: finalState.needHuman,
+        humanReason: finalState.humanReason,
+        rulesApplied: outcome.output.rules_applied,
+        ruleViolation,
+        status: outcome.status,
+        model,
+      },
+      adjustments,
+      state: {
+        before: {
+          leadStage: currentState.leadStage,
+          intent: currentState.intent,
+          needHuman: currentState.needHuman,
+          version: currentState.version,
+        },
+        after: { ...finalState, version: currentState.version },
+      },
+      status: outcome.status,
+      attempts: outcome.attempts,
+      guardViolations,
+      handoffNotes: handoff.notes,
+      persisted: false,
+    };
+  }
+
   const persisted = await persistWithOptimisticLock({
     input,
     customerId,
     trigger,
     model,
     outcome,
-    transition: transition.next,
-    adjustments: transition.adjustments,
+    finalState,
+    adjustments,
+    ruleViolation,
     expectedVersion: currentState.version,
-    stateBefore: currentState,
   });
 
   return {
     suggestion: persisted.suggestion,
-    adjustments: transition.adjustments,
+    adjustments,
     state: {
       before: {
         leadStage: currentState.leadStage,
@@ -181,11 +342,14 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     },
     status: outcome.status,
     attempts: outcome.attempts,
+    guardViolations,
+    handoffNotes: handoff.notes,
+    persisted: true,
   };
 }
 
 // ---------------------------------------------------------------------------
-// 调用 + 校验 + 重试
+// 调用 + 解析 + 结构校验
 // ---------------------------------------------------------------------------
 
 type ValidationOutcome = {
@@ -220,7 +384,6 @@ async function callWithValidation(params: {
       label: `${params.label}#${attempt}`,
     });
 
-    // (a) 调用层失败：区分"预算不足被截断"与其它错误
     if (!lastResult.ok) {
       errors.push(`${lastResult.errorKind}: ${lastResult.errorMessage}`);
       if (lastResult.errorKind === 'truncated') {
@@ -229,7 +392,6 @@ async function callWithValidation(params: {
       continue;
     }
 
-    // (b) 解析失败（模型没吐 JSON）
     const raw = parseLooseJson(lastResult.content ?? '');
     if (raw === undefined) {
       errors.push('bad_json: 模型输出不是合法 JSON');
@@ -237,7 +399,6 @@ async function callWithValidation(params: {
       continue;
     }
 
-    // (c) 结构校验失败：把错误回灌给模型再试一次
     const parsed = schema.safeParse(raw);
     if (!parsed.success) {
       const detail = parsed.error.issues
@@ -257,7 +418,6 @@ async function callWithValidation(params: {
     };
   }
 
-  // (d) 全部尝试失败 → 降级为"转人工"的兜底建议，保证业务不中断
   return {
     output: buildFallbackOutput(errors, params.fallbackStage),
     llm: lastResult,
@@ -292,10 +452,10 @@ async function persistWithOptimisticLock(params: {
   trigger: AgentTrigger;
   model: string;
   outcome: ValidationOutcome;
-  transition: { leadStage: AgentOutput['lead_stage']; intent: string; needHuman: boolean; humanReason: string | null };
+  finalState: { leadStage: AgentOutput['lead_stage']; intent: string; needHuman: boolean; humanReason: string | null };
   adjustments: StateAdjustment[];
+  ruleViolation: string | null;
   expectedVersion: number;
-  stateBefore: { leadStage: string; intent: string; needHuman: boolean; version: number };
 }): Promise<{ suggestion: AiSuggestion; state: { leadStage: string; intent: string; needHuman: boolean; version: number } }> {
   const { ctx } = params.input;
   let expectedVersion = params.expectedVersion;
@@ -310,17 +470,18 @@ async function persistWithOptimisticLock(params: {
             batchId: params.input.batchId ?? null,
             customerIntent: params.outcome.output.customer_intent,
             intentDetail: params.outcome.output.intent_detail || null,
-            leadStage: params.transition.leadStage,
+            leadStage: params.finalState.leadStage,
             nextAction: params.outcome.output.next_action,
             reply: params.outcome.output.reply,
             reason: params.outcome.output.reason,
-            needHuman: params.transition.needHuman,
-            humanReason: params.transition.humanReason,
+            needHuman: params.finalState.needHuman,
+            humanReason: params.finalState.humanReason,
             rulesApplied: params.outcome.output.rules_applied as unknown as Prisma.InputJsonValue,
             trigger: params.trigger,
             stateAdjustments: params.adjustments.length
               ? (params.adjustments as unknown as Prisma.InputJsonValue)
               : undefined,
+            ruleViolation: params.ruleViolation,
             status: params.outcome.status,
             model: params.model,
             promptVersion: PROMPT_VERSION,
@@ -340,21 +501,18 @@ async function persistWithOptimisticLock(params: {
           },
         });
 
-        // 乐观锁：只有版本号仍然是读到的那个值时才更新，避免并发判断互相覆盖
         const updated = await tx.customerState.updateMany({
           where: { customerId: params.customerId, version: expectedVersion },
           data: {
-            leadStage: params.transition.leadStage,
-            intent: params.transition.intent,
-            needHuman: params.transition.needHuman,
-            humanReason: params.transition.humanReason,
+            leadStage: params.finalState.leadStage,
+            intent: params.finalState.intent,
+            needHuman: params.finalState.needHuman,
+            humanReason: params.finalState.humanReason,
             version: { increment: 1 },
           },
         });
 
-        if (updated.count === 0) {
-          throw new StateVersionConflict();
-        }
+        if (updated.count === 0) throw new StateVersionConflict();
 
         const state = await tx.customerState.findUniqueOrThrow({
           where: { customerId: params.customerId },
@@ -365,7 +523,6 @@ async function persistWithOptimisticLock(params: {
       });
     } catch (error) {
       if (error instanceof StateVersionConflict && round < 2) {
-        // 并发更新：重新读取版本号后重试（事务已回滚，不会产生重复建议）
         const fresh = await prisma.customerState.findUnique({
           where: { customerId: params.customerId },
           select: { version: true },

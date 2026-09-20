@@ -1,6 +1,13 @@
 import { prisma } from '@/lib/db';
 import { notFound } from '@/lib/errors';
-import { parseStringList, parseTenantRules, type AuthContext, type TenantRules } from '@/lib/types';
+import {
+  parseHandoff,
+  parseStringList,
+  parseTenantRules,
+  type AuthContext,
+  type HandoffConfig,
+  type TenantRules,
+} from '@/lib/types';
 import { assertManager } from '@/server/auth';
 
 /**
@@ -22,6 +29,8 @@ export type TenantConfig = {
   tone: string;
   rules: TenantRules;
   forbidden: string[];
+  /** 交接规则：什么情况必须交给人工 */
+  handoff: HandoffConfig;
 };
 
 export async function getTenantConfig(ctx: AuthContext): Promise<TenantConfig> {
@@ -34,6 +43,7 @@ export async function getTenantConfig(ctx: AuthContext): Promise<TenantConfig> {
     tone: tenant.tone,
     rules: parseTenantRules(tenant.rules),
     forbidden: parseStringList(tenant.forbidden),
+    handoff: parseHandoff(tenant.handoff),
   };
 }
 
@@ -42,9 +52,10 @@ export type UpdateTenantConfigInput = {
   tone: string;
   rules: Array<{ id: string; text: string; guard?: string }>;
   forbidden: string[];
+  handoff: HandoffConfig;
 };
 
-/** 修改企业销售规则：仅主管，且只能改自己企业 */
+/** 修改企业销售规则与交接规则：仅主管，且只能改自己企业 */
 export async function updateTenantConfig(ctx: AuthContext, input: UpdateTenantConfigInput) {
   assertManager(ctx);
 
@@ -55,6 +66,12 @@ export async function updateTenantConfig(ctx: AuthContext, input: UpdateTenantCo
       tone: input.tone,
       rules: input.rules,
       forbidden: input.forbidden,
+      handoff: {
+        triggers: input.handoff.triggers,
+        keywords: input.handoff.keywords,
+        amountThreshold: input.handoff.amountThreshold,
+        note: input.handoff.note,
+      },
     },
   });
 }

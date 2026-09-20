@@ -87,6 +87,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
           state: agent.state,
           status: agent.status,
           attempts: agent.attempts,
+          // 规则守护的判定结果与交接规则的触发说明（排障与演示都用得上）
+          guardViolations: agent.guardViolations,
+          handoffNotes: agent.handoffNotes,
           agentError: null,
         },
         { status: 201 },

@@ -48,6 +48,15 @@ type SeedTenant = {
   tone: string;
   rules: Array<{ id: string; text: string; guard?: string }>;
   forbidden: string[];
+  /**
+   * 交接规则：不同企业的转人工标准不同，这正是"同一句话、两家企业、判断不同"的来源之一。
+   * 乐蒙（低客单体验课）只要金额不大就交给 AI 跟；机械之家（高客单设备保险）涉及保费就人工核保。
+   */
+  handoff: {
+    keywords: string[];
+    amountThreshold: number | null;
+    note: string;
+  };
   users: Array<{ email: string; name: string; role: 'SALES' | 'MANAGER' }>;
   salesEmail: string;
   customers: SeedCustomer[];
@@ -67,8 +76,18 @@ const TENANTS: SeedTenant[] = [
       },
       { id: 'R2', text: '优先推动预约到店体验课，并主动给出 2 个可选时间段' },
       { id: 'R3', text: '涉及孩子年龄、泳池水质、教练资质的问题要正面回答，不夸大效果' },
+      {
+        id: 'R4',
+        text: '不得使用"保证学会""一定有效"这类绝对化承诺',
+        guard: 'FORBID_ABSOLUTE_PROMISE',
+      },
     ],
     forbidden: ['承诺具体折扣或免单', '承诺孩子一定学会游泳', '承诺医疗或健康效果'],
+    handoff: {
+      keywords: ['退费', '投诉到总部', '曝光', '媒体'],
+      amountThreshold: 5000,
+      note: '体验课与常规课包可由 AI 直接跟进；年卡及以上（金额达到 5000 元）务必人工确认',
+    },
     users: [
       { email: 'manager@lemeng.demo', name: '王敏（销售主管）', role: 'MANAGER' },
       { email: 'sales@lemeng.demo', name: '李婷（课程顾问）', role: 'SALES' },
@@ -130,8 +149,18 @@ const TENANTS: SeedTenant[] = [
       },
       { id: 'R2', text: '先确认设备型号与吨位，再谈保费区间，不报没有依据的价格' },
       { id: 'R3', text: '涉及理赔流程的问题要给出步骤，并说明需人工核保确认' },
+      {
+        id: 'R4',
+        text: '不得承诺一定承保，也不得承诺具体理赔金额',
+        guard: 'FORBID_ABSOLUTE_PROMISE',
+      },
     ],
     forbidden: ['承诺一定承保', '承诺最低价', '承诺理赔金额'],
+    handoff: {
+      keywords: ['起诉', '律师', '监管', '曝光', '退保', '理赔纠纷'],
+      amountThreshold: 1000,
+      note: '凡涉及保费金额、理赔、退保的，一律人工核保，AI 不得直接承诺方案',
+    },
     users: [
       { email: 'manager@jixie.demo', name: '赵刚（销售主管）', role: 'MANAGER' },
       { email: 'sales@jixie.demo', name: '陈浩（客户经理）', role: 'SALES' },
@@ -197,6 +226,18 @@ async function main() {
         tone: seed.tone,
         rules: seed.rules,
         forbidden: seed.forbidden,
+        handoff: {
+          triggers: {
+            complaint: true,
+            wantsHuman: true,
+            aiUnsure: true,
+            highValue: true,
+            ruleConflict: true,
+          },
+          keywords: seed.handoff.keywords,
+          amountThreshold: seed.handoff.amountThreshold,
+          note: seed.handoff.note,
+        },
       },
     });
 
