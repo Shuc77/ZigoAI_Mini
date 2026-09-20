@@ -140,12 +140,51 @@ try {
   await chat.getByText(sentText).waitFor({ timeout: 30_000 });
   ok('销售回复已进入聊天记录');
 
-  // ---- 6. 刷新后数据仍在（持久化） ----
+  // ---- 6. 连续消息合并：客户连发 3 条（这是最容易回归的场景） ----
+  // 两个检查点：
+  //   ① 输入框在等待 AI 判断期间**不能**被锁死（否则"连发"根本无法演示）
+  //   ② 三条消息应被合并成一次判断
+  const burst = [`连发A-${marker}`, `连发B-${marker}`, `连发C-${marker}`];
+  const burstBatches = [];
+
+  for (const text of burst) {
+    await page.getByTestId('customer-composer').fill(text);
+    const post = await clickAndAwaitPost('customer-send', '/messages');
+    if (post.status() !== 201) {
+      fail('连发消息提交失败', `HTTP ${post.status()}`);
+      break;
+    }
+    // 输入框必须立刻回到可用状态
+    const stillDisabled = await page.getByTestId('customer-composer').isDisabled();
+    if (stillDisabled) {
+      fail('发送后输入框被锁死，无法连发消息');
+      break;
+    }
+    burstBatches.push(text);
+  }
+
+  if (burstBatches.length === burst.length) {
+    ok('连发消息不被锁死', `连续提交 ${burst.length} 条全部成功`);
+  }
+
+  for (const text of burst) {
+    await chat.getByText(text).waitFor({ timeout: 30_000 });
+  }
+  ok('连发的消息全部进入聊天记录');
+
+  try {
+    await page.locator('text=合并为一次判断').first().waitFor({ timeout: 90_000 });
+    ok('连发消息被合并为一次 AI 判断', '卡片上标注了合并条数');
+  } catch {
+    fail('未看到合并判断的标注', 'AI 卡片未出现"合并为一次判断"提示');
+  }
+
+  // ---- 7. 刷新后数据仍在（持久化） ----
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByTestId('chat-messages').getByText(sentText).waitFor({ timeout: 30_000 });
   ok('刷新页面后数据仍在（已持久化）');
 
-  // ---- 7. 客户端零异常 ----
+  // ---- 8. 客户端零异常 ----
   if (httpErrors.length === 0) {
     ok('无 4xx / 5xx 请求', '静态资源与接口全部正常');
   } else {

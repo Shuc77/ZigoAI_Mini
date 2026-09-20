@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { newClientId } from '@/lib/uuid';
 
@@ -12,6 +12,11 @@ import { newClientId } from '@/lib/uuid';
  *  - 每条消息带客户端生成的 clientMessageId（幂等键），网络重试/连点不会产生重复消息；
  *  - 提交失败时**保留同一个 clientMessageId**，用户重试仍是同一条消息；
  *  - 提交成功后清空，下一条消息用新的 id。
+ *
+ * 与"连续消息合并"的配合（这里踩过一次真实的坑）：
+ *   发消息接口在窗口期内只入队、不判断，所以"提交成功"和"AI 判断完成"是两件事。
+ *   **提交只等待 POST 本身（几十毫秒），轮询放到后台** —— 否则输入框会在整个等待期间被锁死，
+ *   而"客户连发多条消息"恰好是连续消息合并要演示的场景，锁死输入框等于把功能演示废掉。
  */
 export function MessageComposer({ customerId }: { customerId: string }) {
   const router = useRouter();
@@ -21,41 +26,57 @@ export function MessageComposer({ customerId }: { customerId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  /** 待判断的批次（可能同时有多批：客户连发时它们通常合并成一批） */
+  const pendingBatchesRef = useRef<Set<string>>(new Set());
+  const pollingRef = useRef(false);
+
   /**
-   * 等待这一批消息的 AI 判断完成。
-   *
-   * 引入"连续消息合并"后，发消息接口不再同步返回建议 —— 它会先等一个聚合窗口
-   * （客户可能还在继续打字），窗口关闭后才统一判断。所以这里轮询批次状态，
-   * 一旦建议生成就刷新页面。整个过程对销售是可见的："已收到，正在等待后续消息…"。
+   * 后台轮询：不阻塞输入，直到所有待判断批次都产出了建议。
+   * 之所以要轮询而不是让接口同步返回：聚合窗口要等"客户是否还在继续发言"。
    */
-  async function waitForSuggestion(batchId: string, windowMs: number) {
-    const deadline = Date.now() + Math.max(30_000, windowMs * 4);
-    setNotice(`已收到消息，正在等待客户是否继续发言…（约 ${Math.round(windowMs / 1000)} 秒后统一判断）`);
+  async function pollPendingBatches(windowMs: number) {
+    if (pollingRef.current) return;
+    pollingRef.current = true;
 
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      try {
-        const response = await fetch(
-          `/api/customers/${customerId}/suggestion?batchId=${encodeURIComponent(batchId)}`,
-        );
-        if (!response.ok) continue;
-        const data = (await response.json()) as {
-          suggestion?: unknown;
-          batchMessageCount?: number | null;
-        };
-        if (data.suggestion) {
-          const count = data.batchMessageCount ?? 1;
-          setNotice(count > 1 ? `AI 已把本轮 ${count} 条消息合并判断完成` : null);
-          router.refresh();
-          return;
+    const deadline = Date.now() + Math.max(120_000, windowMs * 6);
+
+    try {
+      while (pendingBatchesRef.current.size > 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        for (const batchId of [...pendingBatchesRef.current]) {
+          try {
+            const response = await fetch(
+              `/api/customers/${customerId}/suggestion?batchId=${encodeURIComponent(batchId)}`,
+            );
+            if (!response.ok) continue;
+            const data = (await response.json()) as {
+              suggestion?: unknown;
+              batchMessageCount?: number | null;
+            };
+            if (data.suggestion) {
+              pendingBatchesRef.current.delete(batchId);
+              const count = data.batchMessageCount ?? 1;
+              setNotice(
+                count > 1
+                  ? `AI 已把本轮客户连发的 ${count} 条消息合并判断完成`
+                  : 'AI 判断已完成',
+              );
+              router.refresh();
+            }
+          } catch {
+            /* 单次轮询失败不影响其它批次，继续重试直到超时 */
+          }
         }
-      } catch {
-        /* 轮询失败就继续等，超时后给用户一个提示 */
       }
-    }
 
-    setNotice('AI 判断仍在进行，可稍后刷新页面查看结果');
-    router.refresh();
+      if (pendingBatchesRef.current.size > 0) {
+        setNotice('AI 判断仍在进行，可稍后刷新页面查看');
+        router.refresh();
+      }
+    } finally {
+      pollingRef.current = false;
+    }
   }
 
   async function submit(event: React.FormEvent) {
@@ -100,13 +121,20 @@ export function MessageComposer({ customerId }: { customerId: string }) {
       }
 
       router.refresh();
+
       if (data.pending && data.batchId) {
-        await waitForSuggestion(data.batchId, data.batchWindowMs ?? 8000);
+        // 关键：**不在这里等待**。提交只等上面这个 POST（几十毫秒），
+        // 轮询交给后台，输入框立刻恢复可用 —— 客户连发多条消息才演示得出来。
+        pendingBatchesRef.current.add(data.batchId);
+        const windowMs = data.batchWindowMs ?? 8000;
+        setNotice(`已收到消息，正在等待客户是否继续发言…（约 ${Math.round(windowMs / 1000)} 秒后统一判断）`);
+        void pollPendingBatches(windowMs);
       }
     } catch {
       setClientMessageId(id);
       setError('网络异常，可直接重试（同一条消息不会重复入库）');
     } finally {
+      // 注意：这里只解除"提交中"状态，与 AI 判断是否完成无关
       setPending(false);
     }
   }
