@@ -33,6 +33,16 @@ function fail(name, detail = '') {
   console.log(`  \u2717 ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+/** React 会在 SSR 输出里转义这些字符，比对页面文本时需要同样处理 */
+function escapeHtml(text) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;');
+}
+
 async function login(email) {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: 'POST',
@@ -189,7 +199,8 @@ console.log('\n核心任务 1 · 客户与聊天记录');
     }).then((r) => r.json());
     const beforeCount = (before.messages ?? []).length;
 
-    const clientMessageId = `smoke-${target.id}`;
+    // 固定幂等键：第一次可能是新建(201)，也可能是历史运行留下的(200 去重)
+    const clientMessageId = `smoke-fixed-${target.id}`;
     const payload = JSON.stringify({
       content: '你们周末有课吗？（冒烟测试消息）',
       clientMessageId,
@@ -201,13 +212,13 @@ console.log('\n核心任务 1 · 客户与聊天记录');
       body: payload,
     });
     const firstBody = await first.json();
-    if (first.status === 201 && firstBody.message?.role === 'CUSTOMER') {
-      ok('录入客户消息成功', `HTTP 201 · 已入库并更新状态时间`);
+    if ((first.status === 201 || firstBody.deduplicated === true) && firstBody.message?.role === 'CUSTOMER') {
+      ok('录入客户消息成功', `HTTP ${first.status}${firstBody.deduplicated ? '（历史数据已存在）' : ' · 已入库'}`);
     } else {
       fail('录入客户消息失败', `HTTP ${first.status} ${JSON.stringify(firstBody).slice(0, 120)}`);
     }
 
-    // 同一条消息重复提交：必须识别为重复，且不产生新消息
+    // 同一条消息重复提交：必须识别为重复
     const second = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', cookie },
@@ -218,11 +229,14 @@ console.log('\n核心任务 1 · 客户与聊天记录');
       headers: { cookie },
     }).then((r) => r.json());
 
+    // 不变量：库里该 clientMessageId 的消息永远只有 1 条（与运行次数无关）
+    const sameKey = (after.messages ?? []).filter((m) => m.clientMessageId === clientMessageId);
     const grew = (after.messages ?? []).length - beforeCount;
-    if (secondBody.deduplicated === true && grew === 1) {
-      ok('消息幂等生效', `重复提交未产生新消息（本客户共新增 ${grew} 条）`);
+
+    if (secondBody.deduplicated === true && sameKey.length === 1 && grew <= 1) {
+      ok('消息幂等生效', `重复提交未产生新消息（该幂等键共 ${sameKey.length} 条）`);
     } else {
-      fail('消息幂等失效', `deduplicated=${secondBody.deduplicated}, 新增 ${grew} 条`);
+      fail('消息幂等失效', `deduplicated=${secondBody.deduplicated}, 同键 ${sameKey.length} 条, 新增 ${grew} 条`);
     }
 
     // 跨租户访问：机械之家的账号访问乐蒙的客户必须 404
@@ -240,6 +254,95 @@ console.log('\n核心任务 1 · 客户与聊天记录');
       ok('跨租户 API 访问返回 404');
     } else {
       fail('跨租户 API 未被隔离', `HTTP ${forbiddenApi.status}`);
+    }
+  }
+}
+
+// --- 5. 核心任务 2/3：AI 判断与 Customer State -------------------------------
+console.log('\n核心任务 2/3 · AI 判断与 Customer State');
+{
+  const cookie = sessions['sales@lemeng.demo'];
+  const list = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+  const target = (list.customers ?? []).find((c) => c.handle === 'smoke_test_handle');
+
+  if (!target) {
+    fail('缺少冒烟测试客户，无法验证 AI 判断');
+  } else {
+    const versionBefore = target.state?.version ?? 0;
+
+    const response = await fetch(`${baseUrl}/api/customers/${target.id}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', cookie },
+      body: JSON.stringify({
+        content: '你们太让我失望了，约好的体验课教练临时换人也不通知，我要投诉！',
+        clientMessageId: `smoke-ai-${Date.now()}`,
+      }),
+    });
+    const body = await response.json();
+    const suggestion = body.suggestion;
+
+    if (response.status === 201 && suggestion) {
+      ok('AI 返回结构化判断', `${suggestion.customerIntent} / ${suggestion.leadStage} / ${suggestion.nextAction}`);
+    } else {
+      fail('AI 未返回结构化判断', `HTTP ${response.status} ${JSON.stringify(body).slice(0, 160)}`);
+    }
+
+    if (suggestion) {
+      const required = [
+        'customerIntent',
+        'leadStage',
+        'nextAction',
+        'reply',
+        'reason',
+        'needHuman',
+      ];
+      const missing = required.filter((key) => suggestion[key] === undefined || suggestion[key] === null);
+      if (missing.length === 0 && suggestion.reply.length > 0) {
+        ok('六个必需字段齐全', `reply 长度 ${suggestion.reply.length}`);
+      } else {
+        fail('必需字段缺失', missing.join('、'));
+      }
+
+      // 审计完整性：原始请求/响应/耗时/token 都必须留痕，否则线上排障只能靠猜
+      const audited =
+        suggestion.rawRequest !== null &&
+        suggestion.rawResponse !== null &&
+        suggestion.latencyMs !== null &&
+        suggestion.promptTokens !== null &&
+        suggestion.promptVersion;
+      if (audited) {
+        ok('AI 调用审计字段完整', `${suggestion.model} ${suggestion.latencyMs}ms, tokens ${suggestion.promptTokens}+${suggestion.completionTokens}`);
+      } else {
+        fail('AI 调用审计字段不完整', JSON.stringify({ latencyMs: suggestion.latencyMs, tokens: suggestion.promptTokens }));
+      }
+
+      // 投诉场景必须触发人工介入（题目要求"至少自行设计一种触发人工介入的场景"）
+      if (suggestion.needHuman === true) {
+        ok('投诉场景触发人工介入', `原因：${suggestion.humanReason ?? '未说明'}`);
+      } else {
+        fail('投诉场景未触发人工介入', `needHuman=${suggestion.needHuman}`);
+      }
+
+      const versionAfter = body.state?.after?.version ?? versionBefore;
+      if (versionAfter === versionBefore + 1) {
+        ok('Customer State 版本推进', `v${versionBefore} → v${versionAfter}`);
+      } else {
+        fail('Customer State 版本未推进', `v${versionBefore} → v${versionAfter}`);
+      }
+
+      // 页面上确实渲染出了判断卡片（含建议回复与规则区）
+      const detail = await fetch(`${baseUrl}/customers/${target.id}`, { headers: { cookie } });
+      const html = await detail.text();
+      const rendered =
+        html.includes('AI 判断') &&
+        html.includes('下一步动作') &&
+        html.includes('判断依据') &&
+        html.includes(escapeHtml(suggestion.reply).slice(0, 12));
+      if (rendered) {
+        ok('判断卡片已在客户详情页渲染', '含意图/阶段/动作/依据/建议回复');
+      } else {
+        fail('判断卡片未正确渲染');
+      }
     }
   }
 }

@@ -1,11 +1,14 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
 import { formatDateTime, formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
 import { requireCustomer } from '@/server/repositories/customers';
 import { listMessages } from '@/server/repositories/messages';
+import { getLatestSuggestion } from '@/server/repositories/suggestions';
+import { getTenantConfig } from '@/server/repositories/tenants';
 import { MessageComposer } from './message-composer';
 
 export default async function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -20,7 +23,11 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     notFound();
   }
 
-  const messages = await listMessages(ctx, customer.id);
+  const [messages, latestSuggestion, tenantConfig] = await Promise.all([
+    listMessages(ctx, customer.id),
+    getLatestSuggestion(ctx, customer.id),
+    getTenantConfig(ctx),
+  ]);
   const state = customer.state;
 
   return (
@@ -133,11 +140,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
             </dl>
           </div>
 
-          <div className="rounded-xl border border-dashed border-slate-300 bg-white/60 p-4 text-xs text-slate-500">
-            <div className="mb-1 font-medium text-slate-600">AI 判断卡片</div>
-            M2 起：客户消息进入后，这里会显示 AI 的意图识别、阶段判断、下一步动作、引用到的企业规则，
-            以及可编辑的建议回复。
-          </div>
+          <AiSuggestionCard suggestion={latestSuggestion} rules={tenantConfig.rules} />
         </div>
       </div>
     </div>

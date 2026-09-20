@@ -120,3 +120,28 @@ export type TenantRule = {
 };
 
 export type TenantRules = TenantRule[];
+
+/**
+ * 从数据库的 Json 字段安全解析租户规则。
+ * 数据库里是 unknown，直接当 TenantRules 用会在运行时炸；这里做一次收口校验。
+ */
+export function parseTenantRules(value: unknown): TenantRules {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return [];
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id : null;
+    const text = typeof record.text === 'string' ? record.text : null;
+    if (!id || !text) return [];
+    const guard = RULE_GUARDS.includes(record.guard as RuleGuard)
+      ? (record.guard as RuleGuard)
+      : undefined;
+    return [{ id, text, guard }];
+  });
+}
+
+/** 从数据库的 Json 字段解析"禁止事项"列表 */
+export function parseStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string');
+}
