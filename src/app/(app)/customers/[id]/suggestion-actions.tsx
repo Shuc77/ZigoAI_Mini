@@ -92,6 +92,7 @@ export function SuggestionActions({
       </div>
 
       <textarea
+        data-testid="suggestion-reply"
         value={reply}
         onChange={(event) => setReply(event.target.value)}
         rows={4}
@@ -111,6 +112,7 @@ export function SuggestionActions({
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
+          data-testid="suggestion-send"
           disabled={pending !== null || reply.trim().length === 0}
           onClick={() => void call('send')}
           className={`${buttonBase} bg-indigo-600 text-white hover:bg-indigo-700`}

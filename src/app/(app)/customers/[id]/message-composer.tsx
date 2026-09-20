@@ -3,6 +3,8 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
+import { newClientId } from '@/lib/uuid';
+
 /**
  * "客户发来消息"的录入框。
  *
@@ -29,7 +31,7 @@ export function MessageComposer({ customerId }: { customerId: string }) {
     setNotice(null);
 
     // 失败重试时复用同一个幂等键
-    const id = clientMessageId || crypto.randomUUID();
+    const id = clientMessageId || newClientId();
 
     try {
       const response = await fetch(`/api/customers/${customerId}/messages`, {
@@ -60,6 +62,7 @@ export function MessageComposer({ customerId }: { customerId: string }) {
   return (
     <form onSubmit={submit} className="space-y-2">
       <textarea
+        data-testid="customer-composer"
         value={content}
         onChange={(event) => setContent(event.target.value)}
         rows={3}
@@ -76,6 +79,7 @@ export function MessageComposer({ customerId }: { customerId: string }) {
         <p className="text-xs text-slate-400">⌘/Ctrl + Enter 发送 · 消息真实入库并参与下一轮 AI 判断</p>
         <button
           type="submit"
+          data-testid="customer-send"
           disabled={pending || content.trim().length === 0}
           className="shrink-0 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
         >

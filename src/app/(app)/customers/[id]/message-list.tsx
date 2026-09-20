@@ -63,6 +63,7 @@ export function MessageList({ messages }: { messages: ChatMessage[] }) {
     <div className="relative flex flex-col lg:min-h-0 lg:flex-1">
       <div
         ref={containerRef}
+        data-testid="chat-messages"
         onScroll={handleScroll}
         className="min-h-[280px] max-h-[70vh] space-y-3 overflow-y-auto px-4 py-4 lg:max-h-none lg:min-h-0 lg:flex-1"
       >
