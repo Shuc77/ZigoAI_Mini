@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
-import { formatDateTime, formatRelative } from '@/lib/format';
+import { formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
 import { requireCustomer } from '@/server/repositories/customers';
@@ -10,6 +10,7 @@ import { listMessages } from '@/server/repositories/messages';
 import { getLatestSuggestion } from '@/server/repositories/suggestions';
 import { getTenantConfig } from '@/server/repositories/tenants';
 import { MessageComposer } from './message-composer';
+import { MessageList } from './message-list';
 import { StateActions } from './state-actions';
 import { SuggestionActions } from './suggestion-actions';
 
@@ -82,34 +83,14 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
               <span className="text-xs text-slate-400">{messages.length} 条</span>
             </div>
 
-            <div className="h-[calc(100vh-27rem)] min-h-[320px] space-y-3 overflow-y-auto px-4 py-4">
-              {messages.map((message) => {
-                const isCustomer = message.role === 'CUSTOMER';
-                return (
-                  <div key={message.id} className={`flex ${isCustomer ? 'justify-start' : 'justify-end'}`}>
-                    <div className="max-w-[80%]">
-                      <div className="mb-1 flex items-center gap-2 text-[11px] text-slate-400">
-                        <span>{isCustomer ? '客户' : '销售'}</span>
-                        <span>{formatDateTime(message.createdAt)}</span>
-                      </div>
-                      <div
-                        className={`prewrap rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
-                          isCustomer
-                            ? 'border border-slate-200 bg-slate-50 text-slate-800'
-                            : 'bg-indigo-600 text-white'
-                        }`}
-                      >
-                        {message.content}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-
-              {messages.length === 0 ? (
-                <p className="py-8 text-center text-sm text-slate-400">还没有聊天记录</p>
-              ) : null}
-            </div>
+            <MessageList
+              messages={messages.map((message) => ({
+                id: message.id,
+                role: message.role,
+                content: message.content,
+                createdAt: message.createdAt.toISOString(),
+              }))}
+            />
 
             <div className="border-t border-slate-100 px-4 py-3">
               <MessageComposer customerId={customer.id} />
