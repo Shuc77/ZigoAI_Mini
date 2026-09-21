@@ -182,17 +182,20 @@ node scripts/smoke.mjs http://42.194.164.30:8080 --deepseek
 
 因此更新命令**必须用 `&&` 串成一条**（失败即停），并且**先确认镜像包已上传**。
 
+> 下面的 `1.2` 只是**版本号占位示例**，实际替换成你要发的版本（当前版本见 `docs/DELIVERY_LOG.md`，最新为 `1.8`）。
+> 一条命令里可以批量替换：把 `1.2` 换成 `1.8` 即可。
+
 ```bash
 # ① 本机：构建镜像并打包（--app-only 只打包应用镜像，89MB）
-docker build --platform linux/amd64 -t zigoai-mini:1.2 .
-node scripts/make-deploy-bundle.mjs zigoai-mini:1.2 --app-only
-# 然后上传 zigoai-deploy-1.2-app.tar.gz 到 /opt/zigoai/
+docker build --platform linux/amd64 -t zigoai-mini:1.8 .
+node scripts/make-deploy-bundle.mjs zigoai-mini:1.8 --app-only
+# 然后上传 zigoai-deploy-1.8-app.tar.gz 到 /opt/zigoai/
 
 # ② 服务器：先确认文件到位（!否则不要往下走）
-ls -lh /opt/zigoai/zigoai-deploy-1.2-app.tar.gz
+ls -lh /opt/zigoai/zigoai-deploy-1.8-app.tar.gz
 
 # ③ 一条命令完成切换：load 失败就不会删旧容器
-cd /opt/zigoai && docker load -i zigoai-deploy-1.2-app.tar.gz && docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.2
+cd /opt/zigoai && docker load -i zigoai-deploy-1.8-app.tar.gz && docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.8
 
 # ④ 验证
 sleep 10; docker logs --tail 5 zigoai-mini; curl -s http://127.0.0.1:8080/api/health
@@ -203,7 +206,7 @@ sleep 10; docker logs --tail 5 zigoai-mini; curl -s http://127.0.0.1:8080/api/he
 **不要删除旧镜像**（`docker rmi`），这样任何时候都能秒级回滚：
 
 ```bash
-docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.1
+docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --network zigoai-net -p 8080:3000 --env-file /opt/zigoai/.env zigoai-mini:1.7
 ```
 
 数据库数据在 `zigoai-pgdata` 卷里，重建应用容器（含回滚）都不受影响。
@@ -215,14 +218,31 @@ docker rm -f zigoai-mini && docker run -d --name zigoai-mini --restart always --
 # 1) 类型与构建
 pnpm typecheck && pnpm build
 
-# 2) Node 层：接口与业务不变量
-node scripts/smoke.mjs
+# 2) Node 层：接口与业务不变量（--deepseek 会真实调用一次模型）
+node scripts/smoke.mjs http://127.0.0.1:8091 --deepseek
 
-# 3) 浏览器层：真实交互（必须！本次连续三个 bug 都只在浏览器里复现）
-docker run -d --name zigoai-e2e-app --network zigoai-e2e-net -p 8083:3000 \
-  -e DATABASE_URL=... -e DEEPSEEK_API_KEY=... -e SESSION_SECRET=... zigoai-mini:1.2
-node scripts/e2e-browser.mjs http://127.0.0.1:8083
+# 3) 浏览器层：真实交互（必须！连续多个 bug 都只在浏览器里复现）
+#    3a) 起一套"和服务器拓扑一致"的一次性环境（独立网络 + 独立数据库 + 独立端口）
+docker network create zigoai-verify-net 2>/dev/null || true
+docker rm -f zigoai-verify-app zigoai-verify-db 2>/dev/null || true
+docker run -d --name zigoai-verify-db --network zigoai-verify-net \
+  -e POSTGRES_USER=zigo -e POSTGRES_PASSWORD=zigo -e POSTGRES_DB=zigoai postgres:16
+sleep 8
+docker run -d --name zigoai-verify-app --network zigoai-verify-net -p 8091:3000 \
+  -e DATABASE_URL="postgresql://zigo:zigo@zigoai-verify-db:5432/zigoai" \
+  -e DEEPSEEK_API_KEY="<你的真实Key>" -e SESSION_SECRET="<随便一串32位随机>" \
+  -e SEED_TOKEN="<自己生成的随机口令>" zigoai-mini:1.8
+
+#    3b) 造演示数据 → 跑浏览器断言（--seed-token 会额外验证"重置后会话与链接仍然有效"）
+curl -s -X POST -H "x-seed-token: <你的 SEED_TOKEN>" http://127.0.0.1:8091/api/admin/reset
+node scripts/e2e-browser.mjs http://127.0.0.1:8091 --seed-token=<你的 SEED_TOKEN>
+
+#    3c) 用完清理
+docker rm -f zigoai-verify-app zigoai-verify-db
 ```
+
+> 为什么坚持在**一次性容器**里验收：环境变量、自动迁移、端口映射、Cookie 的 `Secure` 属性
+> 全都与"裸跑 `next dev`"不同 —— 上线后被打回来的问题，多数就出在这个差里。
 
 ---
 
@@ -235,7 +255,7 @@ node scripts/e2e-browser.mjs http://127.0.0.1:8083
 | 公网打不开、本机 curl 可以 | 安全组或 1Panel 防火墙没放行 8080 |
 | 页面 500 | `docker logs zigoai-mini` 看 `[migrate]`；必要时 `docker exec zigoai-mini node scripts/db-migrate.mjs` |
 | 登录后立刻被踢回 | `.env` 里 `SESSION_SECRET` 为空或太短 |
-| 想重置演示数据 | `curl -s -X POST -H "x-seed-token: zigoai-demo-reset" http://127.0.0.1:8080/api/admin/reset` |
+| 想重置演示数据 | `curl -s -X POST -H "x-seed-token: <你的 SEED_TOKEN>" http://127.0.0.1:8080/api/admin/reset`（重置后**已登录的浏览器不用重新登录**，旧链接也不会 404，因为种子数据按唯一键 upsert） |
 
 ---
 
