@@ -25,6 +25,29 @@ function percent(value: number): string {
   return `${Math.round(value * 100)}%`;
 }
 
+/**
+ * 把可能很长、可能重复的错误信息压成一句话。
+ *
+ * 为什么要压：`errorMessage` 是**每次尝试**的错误用 ` | ` 拼起来的，
+ * 所以"重试 1 次"的记录里同一类错误会出现两遍（例如 `http_error: insufficient Balance | http_error: …`）。
+ * 表格里塞不下也没必要 —— 完整信息在链路页（那里有原始响应与每一次尝试）。
+ */
+const ERROR_LABELS: Array<{ pattern: RegExp; label: string }> = [
+  { pattern: /insufficient\s*balance|余额不足/i, label: '账户余额不足' },
+  { pattern: /truncated|max_tokens/i, label: '输出被截断（已加大预算重试）' },
+  { pattern: /timeout|超时/i, label: '调用超时' },
+  { pattern: /empty_content|空内容/i, label: '模型返回空内容' },
+  { pattern: /bad_response|不是合法 ?json/i, label: '响应格式异常' },
+  { pattern: /network_error|网络/i, label: '网络错误' },
+  { pattern: /http_error|HTTP/i, label: '接口返回错误' },
+  { pattern: /schema/i, label: '输出结构不符合要求' },
+];
+
+function shortError(message: string): string {
+  const hit = ERROR_LABELS.find((item) => item.pattern.test(message));
+  return hit ? hit.label : message.split('|')[0].trim().slice(0, 40);
+}
+
 export default async function AiLogsPage() {
   const ctx = await requirePageAuth();
   const [calls, cost, adoption] = await Promise.all([
@@ -131,8 +154,9 @@ export default async function AiLogsPage() {
                         <span className="ml-1 text-[10px] text-slate-400">重试 {call.retryCount}</span>
                       ) : null}
                       {call.errorMessage ? (
-                        <div className="mt-1 max-w-[220px] break-all text-[10px] text-rose-500" title={call.errorMessage}>
-                          {call.errorMessage.slice(0, 60)}
+                        <div className="mt-1 max-w-[220px] text-[10px] text-rose-500" title={call.errorMessage}>
+                          {/* 列表里只给一句话摘要，完整错误放链路页（那里本来就有原文与每一次尝试） */}
+                          {shortError(call.errorMessage)}
                         </div>
                       ) : null}
                     </td>
@@ -147,7 +171,14 @@ export default async function AiLogsPage() {
                       {call.promptTokens !== null ? `${call.promptTokens}+${call.completionTokens ?? 0}` : '—'}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap text-slate-500">
-                      ¥{(call.estimatedCostCny ?? 0).toFixed(4)}
+                      {/* 单价未配置时不能显示 ¥0.0000 —— 那看起来像"不花钱"，实际是"没算" */}
+                      {cost.estimatedCostCny > 0 ? (
+                        `¥${call.estimatedCostCny.toFixed(4)}`
+                      ) : (
+                        <span className="text-slate-400" title="在 .env 里配置 DEEPSEEK_PRICE_IN_PER_MTOK / _OUT_ 后即可算出金额">
+                          未配置单价
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-slate-500">
                       {call.ruleViolation ? (
