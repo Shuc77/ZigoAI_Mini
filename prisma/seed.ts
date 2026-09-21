@@ -233,11 +233,20 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
   const passwordHash = await hashPassword(DEMO_PASSWORD);
 
   for (const seed of TENANTS) {
-    // 幂等：删掉旧的演示租户（级联清空其下所有数据）再重建
-    await prisma.tenant.deleteMany({ where: { slug: seed.slug } });
-
-    const tenant = await prisma.tenant.create({
-      data: {
+    /*
+     * 幂等 + **保持 id 稳定**（这是踩过一次的真实线上问题）：
+     *
+     * 早期实现是"删除租户再重建"，租户与用户的 id 全都会变，而**已签发的会话 Cookie 里存的是旧 id**。
+     * 于是重置演示数据之后，任何已登录的浏览器都会表现为：
+     *   企业规则页 500、销售账号客户列表变空、客户详情页 404 —— 必须重新登录才恢复。
+     *
+     * 现在改为：租户按 slug、用户按 email 做 upsert（id 不变），
+     * 只重建它们下面的业务数据（客户），客户级联删除消息/状态/建议/跟进任务。
+     * 因此**重置数据不再打断任何已登录的会话**。
+     */
+    const tenant = await prisma.tenant.upsert({
+      where: { slug: seed.slug },
+      create: {
         name: seed.name,
         slug: seed.slug,
         salesGoal: seed.salesGoal,
@@ -245,13 +254,20 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
         rules: seed.rules,
         forbidden: seed.forbidden,
         handoff: {
-          triggers: {
-            complaint: true,
-            wantsHuman: true,
-            aiUnsure: true,
-            highValue: true,
-            ruleConflict: true,
-          },
+          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true },
+          keywords: seed.handoff.keywords,
+          amountThreshold: seed.handoff.amountThreshold,
+          note: seed.handoff.note,
+        },
+      },
+      update: {
+        name: seed.name,
+        salesGoal: seed.salesGoal,
+        tone: seed.tone,
+        rules: seed.rules,
+        forbidden: seed.forbidden,
+        handoff: {
+          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true },
           keywords: seed.handoff.keywords,
           amountThreshold: seed.handoff.amountThreshold,
           note: seed.handoff.note,
@@ -259,12 +275,22 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
       },
     });
 
+    // 只清业务数据（客户级联删除消息 / 状态 / AI 建议 / 跟进任务），不动租户与用户
+    await prisma.customer.deleteMany({ where: { tenantId: tenant.id } });
+
     const userByEmail = new Map<string, string>();
     for (const user of seed.users) {
-      const created = await prisma.user.create({
-        data: {
+      const created = await prisma.user.upsert({
+        where: { email: user.email },
+        create: {
           tenantId: tenant.id,
           email: user.email,
+          name: user.name,
+          passwordHash,
+          role: user.role,
+        },
+        update: {
+          tenantId: tenant.id,
           name: user.name,
           passwordHash,
           role: user.role,

@@ -4,6 +4,7 @@ import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
 import { countBatchMessages } from '@/lib/agent/batch';
 import { explainFollowUp } from '@/lib/agent/followup';
+import { HttpError } from '@/lib/errors';
 import { formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
@@ -25,8 +26,11 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
   let customer;
   try {
     customer = await requireCustomer(ctx, id);
-  } catch {
-    notFound();
+  } catch (error) {
+    // 只把**真正的"找不到"**转成 404；其它错误（数据库抖动、连接超时…）
+    // 必须原样抛出显示为错误页，否则会把真实故障伪装成"客户不存在"，排障时被误导
+    if (error instanceof HttpError && error.status === 404) notFound();
+    throw error;
   }
 
   const [messages, latestSuggestion, tenantConfig, followUpDecision] = await Promise.all([

@@ -19,6 +19,13 @@ const args = process.argv.slice(2);
 const baseUrl = (args.find((a) => a.startsWith('http')) ?? 'http://127.0.0.1:3000').replace(/\/$/, '');
 const checkDeepSeek = args.includes('--deepseek');
 
+/**
+ * 可选：演示数据重置口令（`--seed-token=xxx` 或环境变量 SEED_TOKEN）。
+ * 提供后会额外验证"重置数据不会打断已登录会话"，并在脚本结束时把演示数据恢复干净。
+ */
+const seedTokenArg = args.find((a) => a.startsWith('--seed-token='));
+const seedToken = seedTokenArg ? seedTokenArg.split('=')[1] : (process.env.SEED_TOKEN ?? '');
+
 const PASSWORD = 'Zigo@2026';
 let passed = 0;
 let failed = 0;
@@ -813,6 +820,51 @@ console.log('\n进阶挑战 1 · Follow-up（客户静默跟进）');
     }
   }
 }
+// --- 9. 会话与数据重置的一致性（回归保护） -----------------------------------
+// 真实线上问题：重置演示数据会重建租户与用户，导致**已登录的会话**指向不存在的记录，
+// 表现为"企业规则页 500 / 销售账号客户列表变空 / 客户详情 404，重新登录才好"。
+// 修复方式是让种子数据按唯一键 upsert（id 稳定），并让过期会话优雅要求重新登录。
+if (seedToken) {
+  console.log('\n会话与数据重置的一致性');
+  {
+    const cookie = sessions['sales@lemeng.demo'];
+    const before = await fetch(`${baseUrl}/tenant/config`, { headers: { cookie }, redirect: 'manual' });
+
+    const reset = await fetch(`${baseUrl}/api/admin/reset`, {
+      method: 'POST',
+      headers: { 'x-seed-token': seedToken },
+    });
+
+    if (reset.status === 200) {
+      ok('可重置演示数据', '租户与用户 id 保持稳定（upsert）');
+    } else {
+      fail('重置演示数据失败', `HTTP ${reset.status}`);
+    }
+
+    // 关键断言：**用重置前拿到的会话**继续访问，必须照常可用
+    const after = await fetch(`${baseUrl}/tenant/config`, { headers: { cookie }, redirect: 'manual' });
+    const customers = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+    const count = (customers.customers ?? []).length;
+
+    if (before.status === 200 && after.status === 200 && count > 0) {
+      ok('重置数据不影响已登录会话', `企业规则页仍为 200，客户数 ${count}`);
+    } else {
+      fail(
+        '重置数据打断了已登录会话',
+        `重置前 ${before.status} → 重置后 ${after.status}，客户数 ${count}`,
+      );
+    }
+
+    // 顺带的好处：冒烟结束时演示数据已被恢复干净
+    if (after.status === 200 && count > 0) {
+      ok('冒烟结束后演示数据自动恢复干净', '无需再手工执行 db:seed');
+    }
+  }
+} else {
+  console.log('\n会话与数据重置的一致性');
+  console.log('  · 跳过（未提供 --seed-token=<口令> 或环境变量 SEED_TOKEN）');
+}
+
 console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项`);
 if (failed === 0 && /127\.0\.0\.1|localhost/.test(baseUrl)) {
   console.log('[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。演示前执行 `pnpm db:seed` 可重置演示数据（该客户也会被清除）。');

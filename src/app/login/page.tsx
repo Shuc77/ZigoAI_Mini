@@ -4,9 +4,17 @@ import { LoginForm } from './login-form';
 
 export const metadata = { title: '登录 · ZigoAI Mini' };
 
-export default async function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ reason?: string }>;
+}) {
   const ctx = await readSession();
   if (ctx) redirect('/customers');
+
+  // 会话指向的账号/企业已不存在时，Guard 会带 reason 跳回来 —— 明确告诉用户"重新登录即可"
+  const { reason } = await searchParams;
+  const expired = reason === 'session_expired';
 
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-10">
@@ -15,6 +23,12 @@ export default async function LoginPage() {
           <h1 className="text-2xl font-semibold tracking-tight">ZigoAI Mini</h1>
           <p className="mt-1 text-sm text-slate-500">AI Sales Agent · 让 AI 帮销售判断下一步该做什么</p>
         </div>
+
+        {expired ? (
+          <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            登录状态已失效（账号或企业信息已变更），请重新登录。
+          </div>
+        ) : null}
 
         <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
           <LoginForm />
