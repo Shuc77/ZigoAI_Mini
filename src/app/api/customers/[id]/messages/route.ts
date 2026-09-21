@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { resolveBatchId, scheduleBatch, sweepExpiredBatches } from '@/lib/agent/batch';
-import { env } from '@/lib/env';
+import { countBatchMessages, resolveBatchId, scheduleBatch, sweepExpiredBatches } from '@/lib/agent/batch';
 import { unauthorized } from '@/lib/errors';
 import { getApiAuth } from '@/server/auth';
 import { jsonError, readJson } from '@/server/api';
@@ -80,7 +79,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     }
 
     // ③ 安排窗口到期后的统一判断（同一批次会顺延，避免客户还在打字时就抢答）
-    scheduleBatch({ batchId, tenantId: ctx.tenantId, customerId: id });
+    //    窗口长度按"客户说完了没有"自适应：问句 2s / 连发补充 3s / 单条陈述 8s
+    const messageCount = await countBatchMessages(ctx.tenantId, batchId);
+    const { windowMs, reason } = scheduleBatch({
+      batchId,
+      tenantId: ctx.tenantId,
+      customerId: id,
+      lastContent: parsed.data.content,
+      messageCount,
+    });
 
     // ④ 兜底扫描：不与本次请求同步等待，失败也不影响消息入库
     void sweepExpiredBatches().catch((error) => console.error('[api/messages] 兜底扫描失败', error));
@@ -92,7 +99,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
         pending: true,
         batchId,
         isNewBatch,
-        batchWindowMs: env.batchWindowMs,
+        batchMessageCount: messageCount,
+        // 回传**真实**等待时长与原因，界面据此显示，而不是写死一句"约 8 秒"
+        batchWindowMs: windowMs,
+        batchWindowReason: reason,
         suggestion: null,
         agentError: null,
       },

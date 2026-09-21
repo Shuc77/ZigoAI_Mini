@@ -3,6 +3,11 @@
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
 
+import {
+  DEFAULT_BATCH_WINDOW_MS,
+  describeBatchWindow,
+  type BatchWindowReason,
+} from '@/lib/agent/batch-window';
 import { newClientId } from '@/lib/uuid';
 
 /**
@@ -33,6 +38,9 @@ export function MessageComposer({ customerId }: { customerId: string }) {
   /**
    * 后台轮询：不阻塞输入，直到所有待判断批次都产出了建议。
    * 之所以要轮询而不是让接口同步返回：聚合窗口要等"客户是否还在继续发言"。
+   *
+   * 间隔 1 秒 —— 窗口本身已经压到 2–3 秒，轮询间隔如果还是 1.5 秒，
+   * 等于把好不容易省下来的时间又还回去了（判断好了却要等下一次轮询才显示）。
    */
   async function pollPendingBatches(windowMs: number) {
     if (pollingRef.current) return;
@@ -42,7 +50,7 @@ export function MessageComposer({ customerId }: { customerId: string }) {
 
     try {
       while (pendingBatchesRef.current.size > 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
 
         for (const batchId of [...pendingBatchesRef.current]) {
           try {
@@ -103,6 +111,8 @@ export function MessageComposer({ customerId }: { customerId: string }) {
         pending?: boolean;
         batchId?: string;
         batchWindowMs?: number;
+        batchWindowReason?: BatchWindowReason;
+        batchMessageCount?: number;
       };
 
       if (!response.ok) {
@@ -126,8 +136,15 @@ export function MessageComposer({ customerId }: { customerId: string }) {
         // 关键：**不在这里等待**。提交只等上面这个 POST（几十毫秒），
         // 轮询交给后台，输入框立刻恢复可用 —— 客户连发多条消息才演示得出来。
         pendingBatchesRef.current.add(data.batchId);
-        const windowMs = data.batchWindowMs ?? 8000;
-        setNotice(`已收到消息，正在等待客户是否继续发言…（约 ${Math.round(windowMs / 1000)} 秒后统一判断）`);
+        // 界面显示**服务端刚算出来的真实窗口**，而不是写死的 8 秒：
+        // 客户问了一句就 2 秒，客户在补充说明就 3 秒，客户只是陈述才等 8 秒。
+        const windowMs = data.batchWindowMs ?? DEFAULT_BATCH_WINDOW_MS;
+        const reason = data.batchWindowReason ?? 'STATEMENT';
+        const seconds = Math.max(1, Math.round(windowMs / 1000));
+        setNotice(
+          `已收到消息，${describeBatchWindow(reason)} —— 约 ${seconds} 秒后统一判断` +
+            `（客户继续发言会自动顺延，判断好之后自动出现）`,
+        );
         void pollPendingBatches(windowMs);
       }
     } catch {
@@ -171,7 +188,12 @@ export function MessageComposer({ customerId }: { customerId: string }) {
         <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
       ) : null}
       {notice ? (
-        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">{notice}</div>
+        <div
+          data-testid="composer-notice"
+          className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700"
+        >
+          {notice}
+        </div>
       ) : null}
     </form>
   );

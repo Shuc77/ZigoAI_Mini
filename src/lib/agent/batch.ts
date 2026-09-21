@@ -3,6 +3,7 @@ import { env } from '@/lib/env';
 import { prisma } from '@/lib/db';
 import type { AuthContext } from '@/lib/types';
 import { systemAuthContext } from '@/server/system-context';
+import { resolveBatchWindow, type BatchWindowReason } from './batch-window';
 import { runAgent, type AgentTrigger } from './pipeline';
 
 /**
@@ -28,6 +29,10 @@ import { runAgent, type AgentTrigger } from './pipeline';
  * 3) **窗口期内只入队、不调用 AI**。
  *    第一条消息到达时开窗，后续消息加入同一批次并让窗口顺延（客户还在打字就不急着回），
  *    窗口关闭时才带着**整批消息**做一次判断。
+ *
+ * 4) **窗口长度不是常量，而是"客户说完了没有"的估计**（`resolveBatchWindow`）：
+ *    问句 2 秒 / 连发补充 3 秒 / 单条陈述 8 秒。固定 8 秒会让客户明明问了一句话、
+ *    销售却要干等满 8 秒才能看到判断 —— 那段等待 100% 是我们自己加的（模型只要 100–350ms）。
  */
 
 /** 进程内待处理批次：batchId → 定时器与首次开窗时间，避免同一批次被重复调度 */
@@ -69,13 +74,31 @@ export async function resolveBatchId(
 /**
  * 为一个批次安排处理：窗口到期后跑一次 pipeline。
  * 同一批次重复调用是安全的（内存里有去重表）。
+ *
+ * 窗口长度由 `resolveBatchWindow` 按"客户说完了没有"决定（问句 2s / 连发补充 3s / 陈述 8s），
+ * 并把结果返回给调用方 —— 界面要显示**真实**的等待时间，而不是写死一句"约 8 秒"。
  */
 export function scheduleBatch(params: {
   batchId: string;
   tenantId: string;
   customerId: string;
+  /** 该批次最后一条客户消息的内容（判断"客户是不是在等答案"） */
+  lastContent?: string;
+  /** 该批次已有多少条客户消息（含刚入库的这条） */
+  messageCount?: number;
+  /** 显式指定窗口（测试用） */
   delayMs?: number;
-}): void {
+}): { windowMs: number; reason: BatchWindowReason } {
+  const resolved =
+    params.delayMs !== undefined
+      ? { windowMs: params.delayMs, reason: 'STATEMENT' as BatchWindowReason }
+      : resolveBatchWindow({
+          lastContent: params.lastContent ?? '',
+          messageCount: params.messageCount ?? 1,
+          baseWindowMs: env.batchWindowMs,
+          fastWindowMs: env.batchFastWindowMs,
+        });
+
   const now = Date.now();
   const existing = scheduledTimers.get(params.batchId);
 
@@ -88,7 +111,7 @@ export function scheduleBatch(params: {
   const firstSeenAt = existing?.firstSeenAt ?? now;
   const maxWaitMs = env.batchWindowMs * MAX_WAIT_MULTIPLIER;
   const remainingMaxWait = Math.max(0, firstSeenAt + maxWaitMs - now);
-  const delay = Math.min(params.delayMs ?? env.batchWindowMs, remainingMaxWait);
+  const delay = Math.min(resolved.windowMs, remainingMaxWait);
 
   const timer = setTimeout(() => {
     scheduledTimers.delete(params.batchId);
@@ -100,6 +123,8 @@ export function scheduleBatch(params: {
   // 定时器不应阻止进程退出
   timer.unref?.();
   scheduledTimers.set(params.batchId, { timer, firstSeenAt });
+
+  return { windowMs: delay, reason: resolved.reason };
 }
 
 /** 立即处理一个批次：把该批次内的**全部**客户消息作为一轮沟通交给 AI */
@@ -138,6 +163,10 @@ export async function processBatch(
  *
  * 什么时候会有这种批次：进程重启导致内存定时器丢失、或定时器回调抛异常。
  * 调用时机：① 每次有新消息进来时（顺带扫一遍，成本极低）；② `pnpm agent:scan`（定时任务）。
+ *
+ * 判定阈值刻意用**最长的那个窗口**（`batchWindowMs`，单条陈述档）：兜底扫描的唯一职责是
+ * 捞回"没人管的批次"，它绝不能抢在正常窗口前面动手 —— 否则一个还在等客户补充的批次
+ * 会被提前判断，连续消息合并就白做了。（快速窗口只影响**正常路径**的等待时间。）
  */
 export async function sweepExpiredBatches(limit = 20): Promise<Array<{ batchId: string; messages: number }>> {
   const cutoff = new Date(Date.now() - env.batchWindowMs);

@@ -128,6 +128,23 @@ try {
   await chat.getByText(`${marker}：你们年卡多少钱？`).waitFor({ timeout: 30_000 });
   ok('客户消息已出现在聊天记录');
 
+  /*
+   * ---- 3.5 聚合窗口是"说完就收口"，不是固定 8 秒 ----
+   * 客户这句是问句（在等答案），界面必须显示**服务端算出来的真实等待时间**（约 2 秒），
+   * 而不是写死一句"约 8 秒"。这条断言守的是销售侧的体感：客户问了问题，不该让销售干等。
+   */
+  try {
+    const notice = (await page.getByTestId('composer-notice').textContent()) ?? '';
+    const seconds = Number(/(\d+)\s*秒后统一判断/.exec(notice)?.[1] ?? Number.NaN);
+    if (seconds <= 3) {
+      ok('问句走最短窗口（销售不必干等 8 秒）', `界面显示"约 ${seconds} 秒"｜${notice.slice(0, 40)}`);
+    } else {
+      fail('问句没有走快速窗口', `界面显示 ${notice}`);
+    }
+  } catch (error) {
+    fail('未读到等待提示', String(error.message ?? error).split('\n')[0]);
+  }
+
   // ---- 4. 等待 AI 判断卡片（真实调用 DeepSeek） ----
   await page.waitForSelector('text=建议回复', { timeout: 90_000 });
   const intentText = await page.locator('text=客户意图').first().isVisible();
@@ -178,6 +195,19 @@ try {
     await chat.getByText(text).waitFor({ timeout: 30_000 });
   }
   ok('连发的消息全部进入聊天记录');
+
+  // 客户在连发（还没说完）→ 窗口落在中间档（约 3 秒），既不等满 8 秒也不抢答
+  try {
+    const notice = (await page.getByTestId('composer-notice').textContent()) ?? '';
+    const seconds = Number(/(\d+)\s*秒后统一判断/.exec(notice)?.[1] ?? Number.NaN);
+    if (seconds > 0 && seconds <= 5) {
+      ok('连发时窗口落在中间档', `界面显示"约 ${seconds} 秒"｜${notice.slice(0, 40)}`);
+    } else {
+      fail('连发时的窗口不符合预期', `界面显示 ${notice}`);
+    }
+  } catch (error) {
+    fail('未读到连发后的等待提示', String(error.message ?? error).split('\n')[0]);
+  }
 
   try {
     await page.locator('text=合并为一次判断').first().waitFor({ timeout: 90_000 });

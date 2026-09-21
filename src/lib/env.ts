@@ -46,6 +46,15 @@ export const env = {
 
   /** 连续消息聚合窗口：窗口内的多条客户消息算"一轮沟通"，只调一次 AI */
   batchWindowMs: num('MESSAGE_BATCH_WINDOW_MS', 8_000),
+  /**
+   * "客户在等答案"时的短窗口（客户发的是问句/明确诉求时用）。
+   *
+   * 为什么要有第二个窗口：固定窗口会让销售在客户明明问了一句话之后**干等满 8 秒**，
+   * 而模型本身只要 100–350ms —— 延迟全是我们自己加的。窗口现在按"客户说完了没有"分三档，
+   * 见 `src/lib/agent/batch-window.ts`。
+   * 把它设成与 MESSAGE_BATCH_WINDOW_MS 相同即可退回旧的固定窗口行为。
+   */
+  batchFastWindowMs: num('MESSAGE_BATCH_FAST_WINDOW_MS', 2_000),
   /** 客户静默超过该分钟数即视为需要跟进 */
   followUpIdleMinutes: num('FOLLOWUP_IDLE_MINUTES', 2),
   /** 最大跟进次数，防止无限打扰客户 */

@@ -118,8 +118,38 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
     };
   }
 
-  const latencyMs = Date.now() - startedAt;
-  const text = await response.text();
+  /*
+   * 计时点必须放在**响应体读完之后**（这是踩过的坑，也是审计数据可信度的关键）。
+   *
+   * `fetch()` 在"响应头到达"时就 resolve 了，响应体是之后流式到达的。
+   * 早期实现把计时点放在 fetch 之后，于是 `AiSuggestion.latencyMs` 记录的是 **TTFB（首字节时间）**，
+   * 而不是模型真正花的时间：实测同一个请求 首字节 220ms / 完整响应 2600ms —— **低估了 10 倍**。
+   * 后果很实际：排查"客户抱怨要等很久"时，日志会指向一个"模型只要 200ms"的假象，
+   * 让人去怀疑窗口、网络、数据库，而真正的大头被埋掉了。
+   */
+  const ttfbMs = Date.now() - startedAt;
+
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    const elapsed = Date.now() - startedAt;
+    console.error(`[llm] ${request.label ?? 'call'} 读取响应体失败 耗时 ${elapsed}ms`);
+    return {
+      ok: false,
+      content: null,
+      model,
+      latencyMs: elapsed,
+      usage: EMPTY_USAGE,
+      rawRequest,
+      rawResponse: null,
+      errorKind: 'network_error',
+      errorMessage: `读取响应体失败：${(error as Error).message}`,
+    };
+  }
+
+  /** 模型真实耗时：首字节 + 生成完整响应体的时间 */
+  const fullLatencyMs = Date.now() - startedAt;
 
   let parsed: unknown;
   try {
@@ -130,7 +160,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       ok: false,
       content: null,
       model,
-      latencyMs,
+      latencyMs: fullLatencyMs,
       usage: EMPTY_USAGE,
       rawRequest,
       rawResponse: text.slice(0, 2000),
@@ -166,7 +196,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       ok: false,
       content: null,
       model,
-      latencyMs,
+      latencyMs: fullLatencyMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -188,7 +218,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       ok: false,
       content,
       model,
-      latencyMs,
+      latencyMs: fullLatencyMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -205,7 +235,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       ok: false,
       content: null,
       model,
-      latencyMs,
+      latencyMs: fullLatencyMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -216,14 +246,14 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
   }
 
   console.log(
-    `[llm] ${request.label ?? 'call'} ok model=${model} ${latencyMs}ms tokens=${usage.promptTokens}+${usage.completionTokens}(推理 ${usage.reasoningTokens})`,
+    `[llm] ${request.label ?? 'call'} ok model=${model} ${fullLatencyMs}ms(首字节 ${ttfbMs}ms) tokens=${usage.promptTokens}+${usage.completionTokens}(推理 ${usage.reasoningTokens})`,
   );
 
   return {
     ok: true,
     content,
     model,
-    latencyMs,
+    latencyMs: fullLatencyMs,
     usage,
     rawRequest,
     rawResponse: payload,

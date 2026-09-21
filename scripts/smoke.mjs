@@ -94,7 +94,7 @@ async function sendAndAwaitSuggestion(cookie, customerId, content) {
   return { status: response.status, body, batchId: body.batchId, ...data };
 }
 
-/** 快速连发多条客户消息（不做等待），返回各自的 batchId —— 用于验证"连续消息合并" */
+/** 快速连发多条客户消息（不做等待），返回各自的 batchId 与**服务端计算的窗口** —— 用于验证"连续消息合并" */
 async function sendBurst(cookie, customerId, contents) {
   const results = [];
   for (const content of contents) {
@@ -105,14 +105,44 @@ async function sendBurst(cookie, customerId, contents) {
       body: JSON.stringify({ content, clientMessageId }),
     });
     const body = await response.json().catch(() => ({}));
-    results.push({ status: response.status, batchId: body.batchId, content });
+    results.push({
+      status: response.status,
+      batchId: body.batchId,
+      content,
+      batchWindowMs: body.batchWindowMs,
+      batchWindowReason: body.batchWindowReason,
+      at: Date.now(),
+    });
   }
   return results;
 }
 
+/** 发一条消息并等到判断出现，同时把"服务端给的窗口"和"实际等了多久"一起带回来 */
+async function sendAndAwaitTimed(cookie, customerId, content) {
+  const clientMessageId = `smoke-timed-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const startedAt = Date.now();
+  const response = await fetch(`${baseUrl}/api/customers/${customerId}/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ content, clientMessageId }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (response.status !== 201 || !body.batchId) {
+    return { status: response.status, suggestion: null, elapsedMs: Date.now() - startedAt };
+  }
+  const data = await awaitSuggestionForBatch(cookie, customerId, body.batchId);
+  return {
+    status: response.status,
+    batchId: body.batchId,
+    windowMs: body.batchWindowMs,
+    reason: body.batchWindowReason,
+    elapsedMs: Date.now() - startedAt,
+    ...data,
+  };
+}
+
 /** 轮询某一批次的判断结果 */
-async function awaitSuggestionForBatch(cookie, customerId, batchId, timeoutMs = 120_000) {
-  const deadline = Date.now() + timeoutMs;
+async function awaitSuggestionForBatch(cookie, customerId, batchId, timeoutMs = 120_000) {  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     const poll = await fetch(
@@ -672,12 +702,10 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
   }
 
   // 7.4.5 连续消息合并：客户快速连发 3 条，应当只产生 1 次判断，且提示词里包含全部 3 条
+  //       这三条消息也刚好依次走过窗口的三档：陈述 → 连发补充 → 问句
   if (lemengTarget) {
-    const burst = await sendBurst(lemengCookie, lemengTarget.id, [
-      '你好',
-      '我想咨询一下',
-      '你们周末有课吗？',
-    ]);
+    const burstContents = ['你好', '我们是做少儿英语的', '你们周末有课吗？'];
+    const burst = await sendBurst(lemengCookie, lemengTarget.id, burstContents);
 
     const batchIds = new Set(burst.map((item) => item.batchId));
     if (batchIds.size === 1) {
@@ -686,17 +714,72 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
       fail('连续消息未被合并', `出现了 ${batchIds.size} 个批次`);
     }
 
+    /*
+     * 聚合窗口是**自适应**的：不再固定等 8 秒，而是按"客户说完了没有"分三档。
+     * 这三条消息刚好一路走过三档，因此顺带把三档行为一起钉死：
+     *   你好（单条陈述）→ 8s ｜ 我们是做少儿英语的（连发补充）→ 3s ｜ 你们周末有课吗？（问句）→ 2s
+     * 关键断言是**最后一条是问句时窗口必须最短** —— 客户在等答案，销售不该干等 8 秒。
+     */
+    const tiers = burst.map((item) => `${item.batchWindowReason}:${item.batchWindowMs}`);
+    const expected = ['STATEMENT:8000', 'FOLLOW_UP:3000', 'QUESTION:2000'];
+    if (JSON.stringify(tiers) === JSON.stringify(expected)) {
+      ok('聚合窗口按"客户说完了没有"分三档', tiers.join(' → '));
+    } else {
+      fail('聚合窗口分档不符合预期', `期望 ${expected.join(' → ')}，实际 ${tiers.join(' → ')}`);
+    }
+
+    if (burst[2].batchWindowMs <= 2500) {
+      ok('客户最后一句是问句时窗口最短', `${burst[2].batchWindowMs}ms（旧实现固定等 8000ms）`);
+    } else {
+      fail('问句没有走快速窗口', `实际 ${burst[2].batchWindowMs}ms`);
+    }
+
     const judged = await awaitSuggestionForBatch(lemengCookie, lemengTarget.id, burst[0].batchId);
     const prompt = JSON.stringify(judged.suggestion?.rawRequest ?? {});
-    const allIncluded = ['你好', '我想咨询一下', '你们周末有课吗？'].every((text) => prompt.includes(text));
+    const allIncluded = burstContents.every((text) => prompt.includes(text));
 
     if (judged.suggestion && allIncluded) {
+      const waitedMs = Date.now() - burst[2].at;
       ok(
         '一次判断覆盖了合并后的全部消息',
         `本轮 ${judged.batchMessageCount} 条消息只调用了一次 AI`,
       );
+      // 仅作为证据打印：绝对耗时会受宿主机负载影响，真正的不变量用下面的"相对比较"来守
+      console.log(
+        `    · 从"客户最后一条消息"到"判断出现"共 ${(waitedMs / 1000).toFixed(1)} 秒` +
+          `（窗口 ${burst[2].batchWindowMs}ms；旧实现固定等 8000ms）`,
+      );
     } else {
       fail('合并后的判断不完整', `包含全部消息=${allIncluded}`);
+    }
+
+    /*
+     * 自适应窗口的**核心不变量**用相对比较来守：
+     * 同一台机器、同一时刻、同样只有一条消息，只差"这句话是不是问句"。
+     * 绝对耗时会随宿主机负载漂移，但两者的差值稳定地等于窗口之差（8s - 2s = 6s）。
+     * 这条断言守的是销售的真实体感：**客户问了一句话，不该让销售干等 8 秒**。
+     */
+    const statementRun = await sendAndAwaitTimed(lemengCookie, lemengTarget.id, '我考虑一下，回头再说');
+    const questionRun = await sendAndAwaitTimed(lemengCookie, lemengTarget.id, '你们周末有课吗？');
+    const faster = statementRun.elapsedMs - questionRun.elapsedMs;
+
+    if (
+      statementRun.windowMs === 8000 &&
+      questionRun.windowMs === 2000 &&
+      // 窗口本身差了 6 秒；模型耗时会有波动，所以只要求"明显更快"（≥2 秒）即可
+      faster >= 2000
+    ) {
+      ok(
+        '问句比陈述明显更快（自适应窗口生效）',
+        `陈述 ${(statementRun.elapsedMs / 1000).toFixed(1)}s（窗口 8s） vs ` +
+          `问句 ${(questionRun.elapsedMs / 1000).toFixed(1)}s（窗口 2s），快 ${(faster / 1000).toFixed(1)}s`,
+      );
+    } else {
+      fail(
+        '问句没有明显快于陈述',
+        `陈述 ${statementRun.windowMs}ms/${(statementRun.elapsedMs / 1000).toFixed(1)}s，` +
+          `问句 ${questionRun.windowMs}ms/${(questionRun.elapsedMs / 1000).toFixed(1)}s`,
+      );
     }
   }
 

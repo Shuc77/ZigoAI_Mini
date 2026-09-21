@@ -111,6 +111,7 @@ const MAX_GUARD_RETRIES = 1;
 export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const trigger: AgentTrigger = input.trigger ?? 'NEW_MESSAGE';
   const { ctx, customerId } = input;
+  const startedAt = Date.now();
 
   // ---------- ① 载入上下文（全部强制租户作用域） ----------
   const customer = await requireCustomer(ctx, customerId);
@@ -197,6 +198,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   );
   let guardViolations: GuardViolation[] = [];
   let guardRetries = 0;
+  const contextLoadedAt = Date.now();
 
   for (;;) {
     const { system, user } = buildAgentPrompt({ ...basePromptContext, extraInstruction });
@@ -241,6 +243,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   }
 
   if (!outcome) throw new Error('AI 调用未产生结果');
+  const modelDoneAt = Date.now();
 
   // ---------- ⑥ 交接规则：本轮是否需要人工 ----------
   const handoff = applyHandoffPolicy({
@@ -331,6 +334,19 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     ruleViolation,
     expectedVersion: currentState.version,
   });
+
+  /*
+   * 分段耗时：把"一次判断到底慢在哪"变成可观测的数据。
+   *
+   * 为什么值得专门打一条日志（真实踩坑换来的）：
+   * 客户抱怨"要等 8 秒才出判断"时，第一反应是模型慢 —— 实测模型只要 100–350ms，
+   * 时间其实花在**聚合窗口**和**上下文载入**上。没有这条日志，就只能靠猜。
+   */
+  console.log(
+    `[agent] ${trigger} 判断完成 总 ${Date.now() - startedAt}ms` +
+      `（上下文 ${contextLoadedAt - startedAt} / 模型 ${modelDoneAt - contextLoadedAt} / 落库 ${Date.now() - modelDoneAt}）` +
+      ` model=${model} 消息 ${effectiveNewMessages.length} 条`,
+  );
 
   return {
     suggestion: persisted.suggestion,
