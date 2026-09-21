@@ -23,6 +23,16 @@ export type StateSnapshot = {
 export type StageTransition = {
   next: StateSnapshot;
   adjustments: StateAdjustment[];
+  /**
+   * AI 本轮**建议**进入的终态（成交/流失），没有则为 null。
+   *
+   * 为什么要单独把它带出来（真实踩到的缺陷）：
+   *   原先这段逻辑只做了一件事 —— 拦住 AI 不让它写终态，并记一条 TERMINAL_REQUIRES_HUMAN 修正，
+   *   修正说明还写着"终态属于人工动作"。可**既然是人工动作，就必须有人被通知**：
+   *   原实现不会置 needHuman，于是"客户说不要了"最后只是折叠区里的一句话，没有变成任何人的待办。
+   *   现在把它交给交接策略，由它按企业配置决定是否升级人工（默认升级）。
+   */
+  suggestedTerminal: 'WON' | 'LOST' | null;
 };
 
 export type StateAdjustment = {
@@ -39,6 +49,7 @@ export function computeStageTransition(
 ): StageTransition {
   const adjustments: StateAdjustment[] = [];
   let leadStage: LeadStage = output.lead_stage;
+  let suggestedTerminal: 'WON' | 'LOST' | null = null;
 
   const currentIsTerminal = TERMINAL_STAGES.includes(current.leadStage);
   const suggestedIsTerminal = TERMINAL_STAGES.includes(output.lead_stage);
@@ -56,12 +67,14 @@ export function computeStageTransition(
     // AI 只能"建议"成交或流失，不能直接写终态
     leadStage =
       STAGE_ORDER[current.leadStage] >= STAGE_ORDER.HIGH_INTENT ? current.leadStage : 'HIGH_INTENT';
+    // 把"AI 想定终态"这件事交给交接策略：终态是人工动作 → 默认要升级人工（有人去确认）
+    suggestedTerminal = output.lead_stage === 'LOST' ? 'LOST' : 'WON';
     adjustments.push({
       field: 'lead_stage',
       suggested: output.lead_stage,
       adopted: leadStage,
       rule: 'TERMINAL_REQUIRES_HUMAN',
-      note: '终态属于人工动作，AI 仅提示，阶段暂存为高意向',
+      note: '终态属于人工动作，AI 仅提示，阶段暂存为高意向（已按交接规则升级为人工确认）',
     });
   } else if (STAGE_ORDER[output.lead_stage] < STAGE_ORDER[current.leadStage]) {
     leadStage = current.leadStage;
@@ -77,6 +90,7 @@ export function computeStageTransition(
   return {
     next: { leadStage, intent: output.customer_intent },
     adjustments,
+    suggestedTerminal,
   };
 }
 

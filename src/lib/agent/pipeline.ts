@@ -255,6 +255,9 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     // 把模型的**分类结果**也传进去：need_human 只是一个布尔值，
     // 而 customer_intent / human_reason / next_action 都可以拿来做交叉验证（见 handoff.ts 第 6 步）
     aiCustomerIntent: outcome.output.customer_intent,
+    // AI 建议终态（成交/流失）时，交接策略会把它升级成"需要人工确认"——
+    // 因为终态是人工动作，而"客户可能流失"必须有人去挽回（真实案例见 handoff.ts 第 3.6 步）
+    aiSuggestedTerminal: stageTransition.suggestedTerminal,
     aiNeedHuman: outcome.output.need_human,
     aiHumanReason: outcome.output.human_reason ?? null,
     aiNextAction: outcome.output.next_action,

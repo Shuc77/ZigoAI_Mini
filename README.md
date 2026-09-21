@@ -91,7 +91,7 @@ PostgreSQL 16（7 张表，Docker 容器，数据卷持久化）
 
 | 层 | 选型 | 为什么 |
 |---|---|---|
-| 前端 + 后端 | Next.js 16（App Router，TypeScript strict） | 前后端同仓，API Route 直接做后端；一个人 24 小时内最少的胶水代码 |
+| 前端 + 后端 | Next.js 16（App Router，TypeScript strict） | 前后端同仓，API Route 直接做后端； 24 小时内最少的胶水代码 |
 | UI | Tailwind CSS 4 + 手写组件 | 题目明确"界面普通但逻辑正确 > 漂亮但只是个 Wrapper" |
 | 数据库 | PostgreSQL 16 | 多租户 + 唯一约束 + 事务是本题考点的自然载体；答辩"业务量 ×100"有好答案 |
 | ORM | Prisma 7 + `@prisma/adapter-pg` | 7.x 是 Rust-free 客户端（无平台二进制），Docker 镜像里不会出现引擎/openssl 不匹配问题 |
@@ -109,7 +109,7 @@ PostgreSQL 16（7 张表，Docker 容器，数据卷持久化）
                                      [zigoai-db :5432]（端口只绑 127.0.0.1，不对公网暴露）
 ```
 
-- 容器启动时**自动执行数据库迁移**（自研迁移执行器，运行时不需要 Prisma CLI，幂等）
+- 容器启动时**自动执行数据库迁移**
 - 部署包把**应用镜像与数据库镜像一起打包**，服务器完全不需要访问任何镜像仓库
 - 演示数据一键重置：`POST /api/admin/reset`（口令保护、幂等）
 

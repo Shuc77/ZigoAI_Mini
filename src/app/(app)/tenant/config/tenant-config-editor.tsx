@@ -52,6 +52,8 @@ const TRIGGER_LABELS: Array<{ key: keyof HandoffConfig['triggers']; label: strin
   { key: 'aiUnsure', label: 'AI 无法确认答案 / 涉及未给出的政策' },
   { key: 'highValue', label: '出现明确成交信号（签约、付款、发票）' },
   { key: 'ruleConflict', label: '触发企业规则红线（规则守护判定违规）' },
+  { key: 'churnRisk', label: '客户明确表示不继续（AI 建议置为流失，需人工确认）' },
+  { key: 'dealClosing', label: 'AI 判断已成交（终态需人工确认）' },
 ];
 
 const inputClass =

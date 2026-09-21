@@ -30,6 +30,50 @@ function makeOutput(overrides: Partial<AgentOutput> = {}): AgentOutput {
 }
 
 describe('computeStageTransition — 阶段状态机', () => {
+  /*
+   * AI 建议终态时必须把"这件事"带出来 —— 拦下它只是第一步，
+   * 真正的闭环是"有人被通知去确认"（否则客户可能明天就去别家了）。
+   */
+  describe('AI 建议终态时要把信号交给交接策略', () => {
+    it('AI 建议流失 → 拦下阶段，同时带出 suggestedTerminal=LOST', () => {
+      const result = computeStageTransition(
+        { leadStage: 'HIGH_INTENT', intent: '预约' },
+        makeOutput({ lead_stage: 'LOST', customer_intent: '拒绝' }),
+      );
+
+      expect(result.next.leadStage).toBe('HIGH_INTENT');
+      expect(result.suggestedTerminal).toBe('LOST');
+      expect(result.adjustments[0].rule).toBe('TERMINAL_REQUIRES_HUMAN');
+    });
+
+    it('AI 建议成交 → 同样带出 suggestedTerminal=WON（成交也是人工动作）', () => {
+      const result = computeStageTransition(
+        { leadStage: 'HIGH_INTENT', intent: '询价' },
+        makeOutput({ lead_stage: 'WON' }),
+      );
+
+      expect(result.suggestedTerminal).toBe('WON');
+    });
+
+    it('普通阶段推进时不带终态信号', () => {
+      expect(
+        computeStageTransition({ leadStage: 'NEW', intent: '待判断' }, makeOutput({ lead_stage: 'DISCOVERY' }))
+          .suggestedTerminal,
+      ).toBeNull();
+    });
+
+    it('已是终态时由 TERMINAL_LOCK 处理，不再重复升级人工', () => {
+      const result = computeStageTransition(
+        { leadStage: 'LOST', intent: '拒绝' },
+        makeOutput({ lead_stage: 'WON' }),
+      );
+
+      expect(result.next.leadStage).toBe('LOST');
+      expect(result.suggestedTerminal).toBeNull();
+      expect(result.adjustments[0].rule).toBe('TERMINAL_LOCK');
+    });
+  });
+
   it('阶段正常前进：不做任何修正', () => {
     const result = computeStageTransition(
       { leadStage: 'NEW', intent: '待判断' },

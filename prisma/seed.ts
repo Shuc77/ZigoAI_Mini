@@ -254,7 +254,7 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
         rules: seed.rules,
         forbidden: seed.forbidden,
         handoff: {
-          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true },
+          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true, churnRisk: true, dealClosing: true },
           keywords: seed.handoff.keywords,
           amountThreshold: seed.handoff.amountThreshold,
           note: seed.handoff.note,
@@ -267,7 +267,7 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
         rules: seed.rules,
         forbidden: seed.forbidden,
         handoff: {
-          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true },
+          triggers: { complaint: true, wantsHuman: true, aiUnsure: true, highValue: true, ruleConflict: true, churnRisk: true, dealClosing: true },
           keywords: seed.handoff.keywords,
           amountThreshold: seed.handoff.amountThreshold,
           note: seed.handoff.note,

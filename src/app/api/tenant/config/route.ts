@@ -28,6 +28,10 @@ export const configSchema = z.object({
       aiUnsure: z.boolean(),
       highValue: z.boolean(),
       ruleConflict: z.boolean(),
+      // 新增触发器：老客户端（或不带这两个字段的调用）一律回落到默认值 true，
+      // 避免"保存一次配置"就把新能力静默关掉
+      churnRisk: z.boolean().default(true),
+      dealClosing: z.boolean().default(true),
     }),
     keywords: z.array(z.string().trim().min(1).max(20)).max(20),
     amountThreshold: z.number().int().positive().max(100_000_000).nullable(),

@@ -17,6 +17,12 @@ export const CUSTOMER_INTENTS = [
   '投诉',
   '购买',
   '售后',
+  /**
+   * 客户明确表示不继续（"不要了""算了""不学了"）。
+   * 与"犹豫"的区别：犹豫是还在考虑，拒绝是已经表态 —— 后者必须尽快有人去挽回，
+   * 而且它与"投诉"的处置动作完全不同（投诉=安抚补救，拒绝=挽回 + 确认是否置为流失）。
+   */
+  '拒绝',
   '其他',
 ] as const;
 export type CustomerIntent = (typeof CUSTOMER_INTENTS)[number];
@@ -82,6 +88,10 @@ export const HUMAN_REASONS = [
   '高价值成交信号',
   '触发租户规则红线',
   'AI 输出异常降级',
+  /** 客户明确表示不继续 —— 必须有人赶在他去别家之前挽回 */
+  '客户流失倾向',
+  /** AI 建议成交，但终态是人工动作，需要人确认 */
+  '成交待确认',
   '其他',
 ] as const;
 export type HumanReason = (typeof HUMAN_REASONS)[number];
@@ -165,6 +175,17 @@ export type HandoffTriggers = {
   highValue: boolean;
   /** 触发企业规则红线（规则守护判定违规） */
   ruleConflict: boolean;
+  /**
+   * 客户明确表示不继续（流失倾向）。
+   *
+   * 为什么它是独立的一类，而不是并进 complaint：
+   *   处置动作完全不同 —— 投诉是"安抚 + 服务补救"，流失是"赶在客户去别家之前挽回"。
+   *   实测里客户说「都不方便，不要了」，模型把它归成了"投诉场景"（枚举里没有更贴的类别），
+   *   销售看到的第一句话就会决定他怎么接这个客户 —— 标签错了，动作就会错。
+   */
+  churnRisk: boolean;
+  /** AI 建议进入终态（成交）：终态属于人工动作，同样要有人确认 */
+  dealClosing: boolean;
 };
 
 export type HandoffConfig = {
@@ -184,6 +205,8 @@ export const DEFAULT_HANDOFF: HandoffConfig = {
     aiUnsure: true,
     highValue: true,
     ruleConflict: true,
+    churnRisk: true,
+    dealClosing: true,
   },
   keywords: [],
   amountThreshold: null,
@@ -210,6 +233,10 @@ export function parseHandoff(value: unknown): HandoffConfig {
       aiUnsure: bool('aiUnsure'),
       highValue: bool('highValue'),
       ruleConflict: bool('ruleConflict'),
+      // 存量企业的 JSON 里没有这两个键 → 回落到默认值（true），
+      // 因此**新增触发器不需要数据迁移，也不会被静默关掉**
+      churnRisk: bool('churnRisk'),
+      dealClosing: bool('dealClosing'),
     },
     keywords: parseStringList(record.keywords),
     amountThreshold:

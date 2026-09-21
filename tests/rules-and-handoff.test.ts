@@ -205,7 +205,15 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
       ...base,
       config: {
         ...DEFAULT_HANDOFF,
-        triggers: { complaint: false, wantsHuman: false, aiUnsure: false, highValue: false, ruleConflict: false },
+        triggers: {
+          complaint: false,
+          wantsHuman: false,
+          aiUnsure: false,
+          highValue: false,
+          ruleConflict: false,
+          churnRisk: false,
+          dealClosing: false,
+        },
       },
       customerMessages: [],
       aiNeedHuman: true,
@@ -324,6 +332,87 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
       expect(outcome.needHuman).toBe(false);
       expect(outcome.adjustments).toHaveLength(0);
+      expect(outcome.notes).toHaveLength(0);
+    });
+  });
+
+  /*
+   * 真实案例（客户说「都不方便，不要了」）：
+   *   AI 判对了（明确拒绝、建议置为流失），状态机也拦下了它（不让 AI 写终态），
+   *   但**没有人被通知** —— "终态属于人工动作"却只是一句修正说明。
+   * 这一组守的就是那条闭环：AI 建议终态 → 必须升级人工，且理由是能直接指导动作的那类。
+   */
+  describe('AI 建议终态 → 终态是人工动作，必须有人去确认', () => {
+    it('AI 建议流失 → 升级人工，理由是「客户流失倾向」（不是笼统的投诉）', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['都不方便，不要了'],
+        aiCustomerIntent: '拒绝',
+        aiSuggestedTerminal: 'LOST',
+        aiNextAction: '暂不处理',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.humanReason).toBe('客户流失倾向');
+      expect(outcome.notes.join(' ')).toContain('必须由人确认');
+    });
+
+    it('AI 建议成交 → 升级人工，理由是「成交待确认」', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['那我明天过来签合同'],
+        aiCustomerIntent: '购买',
+        aiSuggestedTerminal: 'WON',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.humanReason).toBe('成交待确认');
+    });
+
+    it('企业显式关闭「流失倾向转人工」时尊重配置（不再升级）', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: { ...DEFAULT_HANDOFF, triggers: { ...DEFAULT_HANDOFF.triggers, churnRisk: false } },
+        customerMessages: ['不要了'],
+        aiCustomerIntent: '拒绝',
+        aiSuggestedTerminal: 'LOST',
+        aiNextAction: '暂不处理',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(false);
+      expect(outcome.notes).toHaveLength(0);
+    });
+
+    it('但若 AI 自己又说了「转人工」，自洽性兜底仍然升级（不受企业开关限制）', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: { ...DEFAULT_HANDOFF, triggers: { ...DEFAULT_HANDOFF.triggers, churnRisk: false } },
+        customerMessages: ['不要了'],
+        aiCustomerIntent: '拒绝',
+        aiSuggestedTerminal: 'LOST',
+        aiNextAction: '转人工',
+        aiNeedHuman: false,
+      });
+
+      // 企业可以关掉"某类风险自动升级"，但关不掉"模型自己说该转人工却标了不需要人"这种自相矛盾
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.adjustments.at(-1)?.rule).toBe('HANDOFF_SELF_CONTRADICTION');
+    });
+
+    it('没有终态信号时完全不介入（普通对话不该被升级）', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['你们周末有课吗？'],
+        aiSuggestedTerminal: null,
+      });
+
+      expect(outcome.needHuman).toBe(false);
       expect(outcome.notes).toHaveLength(0);
     });
   });

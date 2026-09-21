@@ -38,6 +38,8 @@ const REASON_TO_TRIGGER: Record<string, keyof HandoffConfig['triggers'] | 'ALWAY
   'AI 无法确认答案': 'aiUnsure',
   高价值成交信号: 'highValue',
   触发租户规则红线: 'ruleConflict',
+  客户流失倾向: 'churnRisk',
+  成交待确认: 'dealClosing',
   'AI 输出异常降级': 'ALWAYS',
   其他: 'ALWAYS',
 };
@@ -73,6 +75,8 @@ const DOWNGRADE_ACTION: Record<string, NextAction> = {
   'AI 无法确认答案': '回答问题',
   高价值成交信号: '确认需求',
   触发租户规则红线: '回答问题',
+  客户流失倾向: '暂不处理',
+  成交待确认: '确认需求',
 };
 
 export type HandoffOutcome = {
@@ -90,6 +94,8 @@ export function applyHandoffPolicy(params: {
   customerMessages: string[];
   /** AI 对本轮客户意图的**分类结果**（有界枚举，用于交叉验证） */
   aiCustomerIntent: CustomerIntent;
+  /** AI 建议进入的终态（成交/流失），没有则 null —— 终态是人工动作，需要有人确认 */
+  aiSuggestedTerminal?: 'WON' | 'LOST' | null;
   aiNeedHuman: boolean;
   aiHumanReason: string | null;
   aiNextAction: NextAction;
@@ -146,6 +152,27 @@ export function applyHandoffPolicy(params: {
     needHuman = true;
     humanReason = '客户投诉';
     notes.push(`客户消息命中通用维权信号「${riskWord}」，按投诉场景转人工（与企业敏感词表叠加的底线保护）`);
+  }
+
+  // ---- 3.6) AI 建议终态：终态属于人工动作，就必须有人被通知 ------------------
+  //
+  // 真实缺陷（客户说「都不方便，不要了」的实际案例）：
+  //   状态机本来就会拦住 AI 写终态（TERMINAL_REQUIRES_HUMAN），修正说明还写着"终态属于人工动作"——
+  //   但它**只记了一条修正，没有通知任何人**：客户可能明天就去别家，而这件事只是折叠区里的一句话。
+  //   现在把它接进交接策略：默认升级人工，且理由是"客户流失倾向 / 成交待确认"这类**能直接指导动作**的说法，
+  //   而不是笼统的"投诉"。
+  if (params.aiSuggestedTerminal && !needHuman) {
+    const isChurn = params.aiSuggestedTerminal === 'LOST';
+    const triggerKey = isChurn ? 'churnRisk' : 'dealClosing';
+    if (config.triggers[triggerKey]) {
+      needHuman = true;
+      humanReason = isChurn ? '客户流失倾向' : '成交待确认';
+      notes.push(
+        isChurn
+          ? 'AI 判断客户可能不再继续（建议置为流失），但终态必须由人确认 —— 已升级人工，请尽快挽回或确认流失'
+          : 'AI 判断已到成交，但终态必须由人确认 —— 已升级人工核实',
+      );
+    }
   }
 
   // ---- 4) 企业配置关闭某一类转人工（唯一能"降级"的路径，且必须记录） ------

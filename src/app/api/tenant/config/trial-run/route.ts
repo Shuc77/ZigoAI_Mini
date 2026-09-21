@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { runAgent } from '@/lib/agent/pipeline';
 import { unauthorized } from '@/lib/errors';
+import { parseHandoff } from '@/lib/types';
 import { getApiAuth } from '@/server/auth';
 import { jsonError, readJson } from '@/server/api';
 import { configSchema } from '../route';
@@ -58,7 +59,9 @@ export async function POST(request: Request) {
       dryRunMessage: message,
       ruleOverride: {
         rules: draft.rules,
-        handoff: draft.handoff,
+        // 用 parseHandoff 兜底：草稿里缺哪个触发器键就回落默认值，
+        // 不会因为"客户端还没更新"而把新触发器当成 false
+        handoff: parseHandoff(draft.handoff),
         tone: draft.tone,
         salesGoal: draft.salesGoal,
         forbidden: draft.forbidden,
