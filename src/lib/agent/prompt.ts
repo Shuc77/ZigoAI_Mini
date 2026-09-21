@@ -58,7 +58,7 @@ export type PromptContext = {
   history: PromptMessage[];
   /** 本轮新到达的客户消息（连续消息合并后可能有多条） */
   newMessages: PromptMessage[];
-  trigger: 'NEW_MESSAGE' | 'REGENERATE' | 'FOLLOW_UP';
+  trigger: 'NEW_MESSAGE' | 'REGENERATE' | 'FOLLOW_UP' | 'INITIAL_BACKFILL';
   /** 额外指令：例如规则守护发现违规后的重写要求 */
   extraInstruction?: string;
 };

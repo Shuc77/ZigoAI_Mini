@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
-import { countBatchMessages, ensureInitialJudgment } from '@/lib/agent/batch';
+import { countBatchMessages, firstJudgmentWait, runInitialJudgment, type FirstJudgmentWait } from '@/lib/agent/batch';
 import { explainFollowUp } from '@/lib/agent/followup';
 import { HttpError } from '@/lib/errors';
 import { formatRelative } from '@/lib/format';
@@ -13,6 +13,7 @@ import { listMessages } from '@/server/repositories/messages';
 import { getLatestSuggestion } from '@/server/repositories/suggestions';
 import { getTenantConfig } from '@/server/repositories/tenants';
 import { FollowupActions } from './followup-actions';
+import { JudgmentPending } from './judgment-pending';
 import { MessageComposer } from './message-composer';
 import { MessageList } from './message-list';
 import { StateActions } from './state-actions';
@@ -34,15 +35,23 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
   }
 
   /*
-   * 补跑"首次判断"：如果这个客户有客户消息却从未被判断过（种子数据、历史导入、迁移、
-   * 或进程在聚合窗口期间重启造成），就在这里补一次 —— 否则会出现"还没有 AI 判断"与
-   * 跟进区块"建议主动跟进"自相矛盾的画面。已经有判断时这个调用是零成本的（一次查询后直接返回）。
+   * 补跑"首次判断"：有些客户的聊天记录并非从入口进来（种子数据、历史导入、迁移、
+   * 或进程在聚合窗口期间重启），所以系统要能自己发现并补上。
+   *
+   * 关键：**不在页面渲染里 await 这次 AI 调用**。那会让首屏等 1–3 秒甚至更久，
+   * 并且会和 Next 的预取/客户端缓存产生奇怪交互（实测表现为"刷新几次才看到判断"）。
+   * 这里只做廉价检查，把真正的补跑丢到后台，同时给前端一个明确的进度状态并轮询。
    */
+  let judgmentWait: FirstJudgmentWait = 'NONE';
   try {
-    await ensureInitialJudgment({ tenantId: ctx.tenantId, customerId: customer.id });
+    judgmentWait = await firstJudgmentWait({ tenantId: ctx.tenantId, customerId: customer.id });
+    if (judgmentWait === 'BACKFILL') {
+      void runInitialJudgment({ tenantId: ctx.tenantId, customerId: customer.id }).catch((error) => {
+        console.error('[customer-detail] 首次判断补跑失败', error);
+      });
+    }
   } catch (error) {
-    // 补跑失败不能连累页面渲染：消息仍在，判断只是缺失，用户也可以点「重新生成」手动触发
-    console.error('[customer-detail] 首次判断补跑失败', error);
+    console.error('[customer-detail] 首次判断检查失败', error);
   }
 
   const [messages, latestSuggestion, tenantConfig, followUpDecision] = await Promise.all([
@@ -188,6 +197,11 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
             rules={tenantConfig.rules}
             waitingForCustomer={waitingForCustomer}
             batchMessageCount={batchMessageCount}
+            pending={
+              judgmentWait === 'NONE' ? null : (
+                <JudgmentPending customerId={customer.id} variant={judgmentWait} />
+              )
+            }
             actions={
               latestSuggestion ? (
                 <SuggestionActions

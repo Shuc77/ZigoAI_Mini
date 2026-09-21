@@ -36,7 +36,15 @@ import { computeStageTransition, type StateAdjustment } from './state';
  * 六个进阶钩子都挂在这条主干上（聚合窗口在入口、Follow-up 复用本函数）。
  */
 
-export type AgentTrigger = 'NEW_MESSAGE' | 'REGENERATE' | 'FOLLOW_UP';
+/**
+ * 判断的触发来源。
+ * - `NEW_MESSAGE`：客户新消息（可能是一批连续消息合并后的一轮）
+ * - `REGENERATE`：销售手动要求重新判断
+ * - `FOLLOW_UP`：客户静默超时后的跟进建议
+ * - `INITIAL_BACKFILL`：系统发现该客户有历史消息却从未被判断过（种子数据 / 导入 / 迁移 /
+ *   进程在窗口期重启），自动补跑一次。**它与"客户连发多条"是两回事，界面上必须区分描述。**
+ */
+export type AgentTrigger = 'NEW_MESSAGE' | 'REGENERATE' | 'FOLLOW_UP' | 'INITIAL_BACKFILL';
 
 export type RunAgentInput = {
   ctx: AuthContext;

@@ -25,6 +25,7 @@ export function AiSuggestionCard({
   actions,
   waitingForCustomer = false,
   batchMessageCount = null,
+  pending,
 }: {
   suggestion: AiSuggestion | null;
   rules: TenantRules;
@@ -38,8 +39,11 @@ export function AiSuggestionCard({
   waitingForCustomer?: boolean;
   /** 本轮合并了多少条客户消息（连续消息合并的可见证据） */
   batchMessageCount?: number | null;
+  /** 系统正在后台补跑"首次判断"时要展示的加载态（避免出现"还没有 AI 判断"这种误导） */
+  pending?: React.ReactNode;
 }) {
   if (!suggestion) {
+    if (pending) return <>{pending}</>;
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-white/60 p-4 text-xs text-slate-500">
         <div className="mb-1 font-medium text-slate-600">AI 判断卡片</div>
@@ -88,7 +92,12 @@ export function AiSuggestionCard({
           <span>prompt {suggestion.promptVersion}</span>
         </div>
 
-        {batchMessageCount !== null && batchMessageCount > 1 ? (
+        {suggestion.trigger === 'INITIAL_BACKFILL' ? (
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            这条判断基于该客户此前的 <span className="font-medium">{batchMessageCount ?? 1}</span> 条历史消息
+            —— 系统发现这些消息还没有被判断过（例如来自导入、迁移或演示数据），自动补跑了一次。
+          </div>
+        ) : batchMessageCount !== null && batchMessageCount > 1 ? (
           <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-xs text-indigo-800">
             本轮把客户连续发送的 <span className="font-medium">{batchMessageCount}</span> 条消息
             <span className="font-medium">合并为一次判断</span>（否则会连续回复 {batchMessageCount} 次）

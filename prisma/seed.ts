@@ -240,9 +240,9 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
      * 于是重置演示数据之后，任何已登录的浏览器都会表现为：
      *   企业规则页 500、销售账号客户列表变空、客户详情页 404 —— 必须重新登录才恢复。
      *
-     * 现在改为：租户按 slug、用户按 email 做 upsert（id 不变），
-     * 只重建它们下面的业务数据（客户），客户级联删除消息/状态/建议/跟进任务。
-     * 因此**重置数据不再打断任何已登录的会话**。
+     * 现在改为：租户按 slug、用户按 email、**客户按 (tenantId, handle)** 全部 upsert（id 不变），
+     * 只重建它们下面的聊天记录 / AI 建议 / 状态 / 跟进任务。
+     * 因此**重置数据不再打断任何已登录的会话，也不会让已打开的链接失效**。
      */
     const tenant = await prisma.tenant.upsert({
       where: { slug: seed.slug },
@@ -275,8 +275,12 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
       },
     });
 
-    // 只清业务数据（客户级联删除消息 / 状态 / AI 建议 / 跟进任务），不动租户与用户
-    await prisma.customer.deleteMany({ where: { tenantId: tenant.id } });
+    /*
+     * 注意：这里**不能**再 `deleteMany({ tenantId })` 一把清空客户。
+     * 那样客户 id 会全部变化，已经打开的 /customers/<id> 立刻 404 ——
+     * 这正是"重置数据后详情页打不开、要重新登录"的根因。
+     * 客户按 (tenantId, handle) 逐个 upsert（见下），只清非种子客户。
+     */
 
     const userByEmail = new Map<string, string>();
     for (const user of seed.users) {
@@ -302,25 +306,51 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
     const salesUserId = userByEmail.get(seed.salesEmail);
     if (!salesUserId) throw new Error(`种子数据缺少销售账号 ${seed.salesEmail}`);
 
+    /*
+     * 客户也要**保持 id 稳定**（这是同一个线上问题的另一半）。
+     * 早期实现是"删掉再建"，客户的 id 会变 —— 于是任何已经打开的客户详情页
+     * 在重置数据之后就变成 404，必须重新登录/重新点进去才恢复。
+     * 现在按 (tenantId, handle) 定位：存在就复用（更新档案），只清掉它下面的
+     * 消息 / AI 建议 / 状态 / 跟进任务再重建。
+     *
+     * 顺带把"不属于种子清单"的客户删掉（例如自动化冒烟测试创建的"冒烟测试客户"），
+     * 所以重置之后演示数据一定是干净的。
+     */
+    const seededHandles = seed.customers.map((customer) => customer.handle);
+    await prisma.customer.deleteMany({
+      where: { tenantId: tenant.id, handle: { notIn: seededHandles } },
+    });
+
     for (const customer of seed.customers) {
-      const created = await prisma.customer.create({
-        data: {
-          tenantId: tenant.id,
-          name: customer.name,
-          handle: customer.handle,
-          phone: customer.phone,
-          source: customer.source,
-          note: customer.note,
-          assigneeId: salesUserId,
-        },
+      const existing = await prisma.customer.findFirst({
+        where: { tenantId: tenant.id, handle: customer.handle },
+        select: { id: true },
       });
+
+      const profile = {
+        name: customer.name,
+        handle: customer.handle,
+        phone: customer.phone,
+        source: customer.source,
+        note: customer.note,
+        assigneeId: salesUserId,
+      };
+
+      const record = existing
+        ? await prisma.customer.update({ where: { id: existing.id }, data: profile })
+        : await prisma.customer.create({ data: { ...profile, tenantId: tenant.id } });
+
+      // 清掉该客户的历史数据（保留客户本身与它的 id）
+      await prisma.message.deleteMany({ where: { customerId: record.id } });
+      await prisma.aiSuggestion.deleteMany({ where: { customerId: record.id } });
+      await prisma.followUpTask.deleteMany({ where: { customerId: record.id } });
 
       // 消息按时间升序写入，保证详情页顺序正确
       const ordered = [...customer.messages].sort((a, b) => b.minutesAgo - a.minutesAgo);
       await prisma.message.createMany({
         data: ordered.map((message) => ({
           tenantId: tenant.id,
-          customerId: created.id,
+          customerId: record.id,
           role: message.role,
           content: message.content,
           senderUserId: message.bySales ? salesUserId : null,
@@ -331,18 +361,21 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
       const lastCustomerMessage = ordered.filter((m) => m.role === 'CUSTOMER').at(-1);
       const lastAnyMessage = ordered.at(-1);
 
-      await prisma.customerState.create({
-        data: {
-          tenantId: tenant.id,
-          customerId: created.id,
-          leadStage: customer.state.leadStage,
-          intent: customer.state.intent,
-          needHuman: customer.state.needHuman,
-          humanReason: customer.state.humanReason,
-          followUpCount: customer.state.followUpCount ?? 0,
-          lastContactAt: lastAnyMessage ? minutesAgo(lastAnyMessage.minutesAgo) : null,
-          lastCustomerMessageAt: lastCustomerMessage ? minutesAgo(lastCustomerMessage.minutesAgo) : null,
-        },
+      const stateData = {
+        leadStage: customer.state.leadStage,
+        intent: customer.state.intent,
+        needHuman: customer.state.needHuman,
+        humanReason: customer.state.humanReason,
+        followUpCount: customer.state.followUpCount ?? 0,
+        lastFollowUpAt: null,
+        lastContactAt: lastAnyMessage ? minutesAgo(lastAnyMessage.minutesAgo) : null,
+        lastCustomerMessageAt: lastCustomerMessage ? minutesAgo(lastCustomerMessage.minutesAgo) : null,
+      };
+
+      await prisma.customerState.upsert({
+        where: { customerId: record.id },
+        create: { tenantId: tenant.id, customerId: record.id, ...stateData },
+        update: stateData,
       });
     }
 

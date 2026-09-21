@@ -3,7 +3,7 @@ import { env } from '@/lib/env';
 import { prisma } from '@/lib/db';
 import type { AuthContext } from '@/lib/types';
 import { systemAuthContext } from '@/server/system-context';
-import { runAgent } from './pipeline';
+import { runAgent, type AgentTrigger } from './pipeline';
 
 /**
  * 连续消息合并（进阶挑战 2）。
@@ -107,6 +107,7 @@ export async function processBatch(
   batchId: string,
   tenantId: string,
   customerId: string,
+  trigger: AgentTrigger = 'NEW_MESSAGE',
 ): Promise<{ processed: boolean; messageCount: number }> {
   const messages = await prisma.message.findMany({
     where: { tenantId, customerId, batchId },
@@ -126,7 +127,7 @@ export async function processBatch(
     customerId,
     messageIds: customerMessageIds,
     batchId,
-    trigger: 'NEW_MESSAGE',
+    trigger,
   });
 
   return { processed: true, messageCount: customerMessageIds.length };
@@ -198,20 +199,68 @@ export async function countBatchMessages(tenantId: string, batchId: string): Pro
 }
 
 /**
- * 补跑「首次判断」：若该客户有客户消息、但**从未产生过任何 AI 判断**，就补跑一次。
+ * 该客户当前"首次判断"的状态 —— **廉价检查，不触发任何 AI 调用**。
  *
- * 为什么需要它（一个真实的体验缺口）：
- * 消息并非都从入口进来 —— 种子数据（演示数据直接写库）、历史会话导入、数据迁移，
- * 或者进程在聚合窗口期间重启，都会留下"有客户消息但没有判断"的客户。
- * 表现是打开客户详情页看到「还没有 AI 判断」，而旁边的跟进区块却说「客户已静默 N 分钟，
- * 建议主动跟进」—— 两个区块自相矛盾，看起来像系统没工作。
+ * - `NONE`：已经有判断，或客户压根没说过话 → 不需要等待
+ * - `BACKFILL`：有客户消息但从未判断过 → 需要**补跑**（种子数据直接写库、历史导入、
+ *   数据迁移，或进程在聚合窗口期间重启，都会留下这种客户）
+ * - `IN_FLIGHT`：消息已归批但判断还没落库 → 判断**正在跑**，界面同样要等待
  *
- * 语义上这和 `sweepExpiredBatches` 是同一类：**入口漏掉的消息，系统必须能自己补上**。
+ * 为什么必须把 `IN_FLIGHT` 也算进来（这是真实踩过的坑）：
+ * 只判断"有没有未归批的消息"时，页面渲染会在后台补跑启动后立刻变成 false，
+ * 于是**第二次打开/刷新**页面就退回「还没有 AI 判断」这张误导性的占位卡，
+ * 而且不再轮询 —— 用户看到的现象就是"要刷新好几次判断才出来"。
+ * 判断正在跑和判断还没开始，对用户是同一件事：**等一会儿就好**。
+ *
+ * 语义上这与 `sweepExpiredBatches` 同类：**入口漏掉的消息，系统必须能自己补上**。
+ */
+export type FirstJudgmentWait = 'NONE' | 'BACKFILL' | 'IN_FLIGHT';
+
+export async function firstJudgmentWait(params: {
+  tenantId: string;
+  customerId: string;
+}): Promise<FirstJudgmentWait> {
+  const existing = await prisma.aiSuggestion.findFirst({
+    where: { tenantId: params.tenantId, customerId: params.customerId },
+    select: { id: true },
+  });
+  if (existing) return 'NONE';
+
+  const [unbatched, batched] = await Promise.all([
+    prisma.message.count({
+      where: {
+        tenantId: params.tenantId,
+        customerId: params.customerId,
+        role: 'CUSTOMER',
+        batchId: null,
+      },
+    }),
+    prisma.message.count({
+      where: {
+        tenantId: params.tenantId,
+        customerId: params.customerId,
+        role: 'CUSTOMER',
+        batchId: { not: null },
+      },
+    }),
+  ]);
+
+  if (unbatched > 0) return 'BACKFILL';
+  return batched > 0 ? 'IN_FLIGHT' : 'NONE';
+}
+
+/**
+ * 补跑「首次判断」。
+ *
+ * **不要直接 await 在页面渲染里**：那会让首屏等一次 AI 调用（1–3 秒甚至更久），
+ * 并且会和 Next 的预取/客户端缓存产生奇怪交互（实测表现为"刷新几次才看到判断"）。
+ * 正确用法是页面先 `needsInitialJudgment()` 判断，再把这个函数丢到后台执行，
+ * 同时给前端一个明确的"正在生成首次判断…"状态并轮询（见 judgment-pending.tsx）。
  *
  * 幂等：已有任何判断 → 直接返回；没有未归批的客户消息 → 直接返回；
- * 归批后交给 `processBatch`，它自身也会再检查一次"该批次是否已有建议"。
+ * 归批后交给 `processBatch`，它自身还会再检查一次"该批次是否已有建议"。
  */
-export async function ensureInitialJudgment(params: {
+export async function runInitialJudgment(params: {
   tenantId: string;
   customerId: string;
 }): Promise<{ triggered: boolean; messageCount: number }> {
@@ -228,13 +277,13 @@ export async function ensureInitialJudgment(params: {
   });
   if (unbatched.length === 0) return { triggered: false, messageCount: 0 };
 
-  // 把这些"从没被判断过"的消息归到同一批（它们本来就是一轮沟通）
+  // 把这些"从没被判断过"的历史消息归到同一批，并标记为**补跑**（界面上要与"客户连发"区分开）
   const batchId = randomUUID();
   await prisma.message.updateMany({
     where: { id: { in: unbatched.map((message) => message.id) } },
     data: { batchId },
   });
 
-  const result = await processBatch(batchId, params.tenantId, params.customerId);
+  const result = await processBatch(batchId, params.tenantId, params.customerId, 'INITIAL_BACKFILL');
   return { triggered: result.processed, messageCount: result.messageCount };
 }

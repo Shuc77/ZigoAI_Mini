@@ -16,6 +16,7 @@ const TRIGGER_LABELS: Record<string, string> = {
   NEW_MESSAGE: '客户新消息',
   REGENERATE: '重新生成',
   FOLLOW_UP: '跟进',
+  INITIAL_BACKFILL: '首次判断补跑',
 };
 
 function percent(value: number): string {

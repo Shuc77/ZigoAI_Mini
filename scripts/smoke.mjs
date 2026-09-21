@@ -126,6 +126,30 @@ async function awaitSuggestionForBatch(cookie, customerId, batchId, timeoutMs = 
   return { suggestion: null, batchMessageCount: null };
 }
 
+/** 取每个演示客户的 id（handle → id），用于断言"重置数据不改变客户 id" */
+async function customerIdsByHandle(cookie) {
+  const data = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+  const map = {};
+  for (const customer of data.customers ?? []) map[customer.handle] = customer.id;
+  return map;
+}
+
+/** 轮询某个客户的最新判断，直到出现或超时（补跑是后台任务，不能假设立刻可用） */
+async function pollSuggestion(cookie, customerId, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${baseUrl}/api/customers/${customerId}/suggestion`, {
+      headers: { cookie },
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.suggestion) return data.suggestion;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+  }
+  return null;
+}
+
 console.log(`\n[smoke] 目标：${baseUrl}${checkDeepSeek ? '（含真实 AI 调用）' : ''}\n`);
 
 // 目标不可达时给出明确提示并退出，而不是抛出一堆 undici 堆栈
@@ -830,6 +854,10 @@ if (seedToken) {
     const cookie = sessions['sales@lemeng.demo'];
     const before = await fetch(`${baseUrl}/tenant/config`, { headers: { cookie }, redirect: 'manual' });
 
+    // 重置**之前**先把客户 id 记下来：它们是详情页 URL 的一部分，必须跨重置保持稳定
+    const idBefore = await customerIdsByHandle(cookie);
+    const zhangBefore = idBefore['zhang_nvshi'];
+
     const reset = await fetch(`${baseUrl}/api/admin/reset`, {
       method: 'POST',
       headers: { 'x-seed-token': seedToken },
@@ -855,6 +883,37 @@ if (seedToken) {
       );
     }
 
+    /*
+     * 客户 id 稳定性（真实线上问题回归）：
+     * 重置数据曾经会**删掉并重建**客户，于是浏览器里已打开的 /customers/<id> 全部 404，
+     * 用户以为"又要重新登录"。现在种子按 (tenantId, handle) upsert，id 必须保持一致。
+     */
+    const idAfter = await customerIdsByHandle(cookie);
+    const zhangAfter = idAfter['zhang_nvshi'];
+
+    if (zhangBefore && zhangAfter && zhangBefore === zhangAfter) {
+      ok('重置数据不影响客户 id', `zhang_nvshi 仍为 ${zhangAfter.slice(0, 8)}…（旧链接直接可用）`);
+    } else {
+      fail('重置数据后客户 id 变了', `重置前 ${zhangBefore ?? '无'} → 重置后 ${zhangAfter ?? '无'}`);
+    }
+
+    if (zhangBefore) {
+      // 用**重置前**的 id 访问详情页，应当照常 200（这正是用户点书签/回退时的路径）
+      const page = await fetch(`${baseUrl}/customers/${zhangBefore}`, {
+        headers: { cookie },
+        redirect: 'manual',
+      });
+      const html = page.status === 200 ? await page.text() : '';
+
+      if (page.status === 200 && html.includes('data-testid="judgment-pending"')) {
+        ok('重置后旧的客户详情链接仍可打开', '200，且先渲染"判断进行中"占位（不阻塞首屏）');
+      } else if (page.status === 200) {
+        ok('重置后旧的客户详情链接仍可打开', '200（判断已就绪，无占位）');
+      } else {
+        fail('重置后旧的客户详情链接打不开', `HTTP ${page.status}（id=${zhangBefore.slice(0, 8)}…）`);
+      }
+    }
+
     // 顺带的好处：冒烟结束时演示数据已被恢复干净
     if (after.status === 200 && count > 0) {
       ok('冒烟结束后演示数据自动恢复干净', '无需再手工执行 db:seed');
@@ -865,33 +924,32 @@ if (seedToken) {
      * 种子数据是直接写库的，绕过了入口 pipeline，所以演示客户一开始都没有 AI 判断。
      * 打开客户详情页时系统应当自动补上 —— 否则页面会同时出现"还没有 AI 判断"
      * 与"客户已静默 N 分钟，建议主动跟进"这种自相矛盾的状态。
+     * 补跑是**后台任务**（不能让页面白等 10 秒），所以这里轮询等待。
      */
-    const freshList = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
-    const zhangs = (freshList.customers ?? []).find((c) => c.handle === 'zhang_nvshi');
+    if (zhangAfter) {
+      const seeded = idBefore['zhang_nvshi'] === zhangAfter;
+      const judged = await pollSuggestion(cookie, zhangAfter, 45_000);
 
-    if (zhangs) {
-      const before = await fetch(`${baseUrl}/api/customers/${zhangs.id}/suggestion`, {
-        headers: { cookie },
-      }).then((r) => r.json());
-
-      // 打开详情页（这一步会触发补跑）
-      await fetch(`${baseUrl}/customers/${zhangs.id}`, { headers: { cookie } });
-
-      const afterJudgment = await fetch(`${baseUrl}/api/customers/${zhangs.id}/suggestion`, {
-        headers: { cookie },
-      }).then((r) => r.json());
-
-      if (before.suggestion === null && afterJudgment.suggestion !== null) {
+      if (judged) {
         ok(
           '打开详情页会补跑首次判断',
-          `从未判断 → ${afterJudgment.suggestion.customerIntent} / ${afterJudgment.suggestion.leadStage}`,
+          `${judged.customerIntent} / ${judged.leadStage}（后台补跑，页面不阻塞）`,
         );
+
+        /*
+         * 表述准确性：补跑用的是历史消息，**不是**一轮里连续发来的消息。
+         * 界面文案必须据此区分，否则会把"逐条聊了半小时"说成"连续发了 3 条"。
+         */
+        if (judged.trigger === 'INITIAL_BACKFILL') {
+          ok('补跑的判断标注为"首次判断补跑"', `trigger=${judged.trigger}`);
+        } else {
+          fail('补跑判断的触发原因不对', `期望 INITIAL_BACKFILL，实际 ${judged.trigger}`);
+        }
       } else {
-        fail(
-          '首次判断补跑未生效',
-          `打开前=${before.suggestion ? '已有' : '无'}，打开后=${afterJudgment.suggestion ? '有' : '无'}`,
-        );
+        fail('首次判断补跑未生效', '等待 45 秒后仍无 AI 判断');
       }
+
+      if (!seeded) fail('前置断言异常', '重置前后客户 id 不一致，补跑断言不可信');
     }
   }
 } else {
