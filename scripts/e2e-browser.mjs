@@ -355,6 +355,61 @@ try {
         headers: { 'x-seed-token': seedToken },
       });
     }
+
+    /*
+     * ---- 11. 历史未判断 + 刚发新消息（截图场景回归） ----
+     *
+     * 真实场景：演示客户的历史消息从未被判断过（种子数据直接写库），
+     * 而销售刚又发了一条「我要投诉你们」。页面上同时有**两件事在跑**：
+     *   ① 历史消息的补跑   ② 新消息那一轮的判断
+     * 早期实现"一旦有判断就停止等待"，于是补跑先落库 → 加载态消失 →
+     * 而新消息的判断还没回来 → 用户看到的卡片没反映自己刚发的消息，只能手动刷新。
+     *
+     * 这条断言要求：**不做任何手动刷新**，卡片最终显示的是新消息的判断（投诉 → 需人工）。
+     */
+    const staleList = await page.request.get(`${baseUrl}/api/customers`);
+    const staleDemo = ((await staleList.json()).customers ?? []).find(
+      (c) => c.handle === 'zhang_nvshi',
+    );
+
+    if (staleDemo) {
+      await page.goto(`${baseUrl}/customers/${staleDemo.id}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('textarea', { timeout: 20_000 });
+
+      const stalePendingSeen = await page
+        .locator('[data-testid="judgment-pending"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (stalePendingSeen) {
+        ok('历史未判断时先给出加载态', '不是干巴巴的"还没有 AI 判断"');
+      } else {
+        fail('未看到加载态', '种子客户的历史消息未被判断，本应显示补跑提示');
+      }
+
+      await page.getByTestId('customer-composer').fill('我要投诉你们');
+      const complaintSent = await clickAndAwaitPost('customer-send', '/messages');
+      if (complaintSent.status() !== 201) fail('投诉消息提交失败', `HTTP ${complaintSent.status()}`);
+
+      // 关键：全程不手动刷新，等卡片自己变
+      try {
+        await page.locator('text=建议人工介入').first().waitFor({ timeout: 120_000 });
+        ok('新消息的判断自动出现（无需手动刷新）', '历史补跑与新消息判断两件事都完成后才收敛');
+      } catch {
+        fail('新消息的判断没有自动出现', '补跑先落库后加载态提前消失，用户会以为系统没反应');
+      }
+
+      const escalateText = await page
+        .locator('dt', { hasText: '是否需人工' })
+        .first()
+        .evaluate((el) => el.parentElement?.textContent ?? '')
+        .catch(() => '');
+      if (escalateText.includes('是')) {
+        ok('投诉被升级为人工介入（状态卡已同步）', escalateText.replace(/\s+/g, ' ').trim());
+      } else {
+        fail('投诉未升级为人工介入', escalateText.replace(/\s+/g, ' ').trim() || '未读到状态卡');
+      }
+    }
   } else {
     console.log('  · 跳过"重置后加载态"检查（未提供 --seed-token=<口令> 或 SEED_TOKEN）');
   }

@@ -74,6 +74,23 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
   );
 
   /**
+   * 还有"没有被判断覆盖"的客户消息吗？—— 决定 AI 卡片显示加载态还是结果。
+   *
+   * 判据：存在客户消息，且（**还没有任何判断**，或**最新判断早于最后一条客户消息**）。
+   *
+   * 为什么不能只看"有没有判断"（真实踩到的坑，见截图场景）：
+   *   演示客户的历史消息从未被判断过（种子数据直接写库），而销售刚又发了一条新消息。
+   *   这时页面上其实有**两件在跑的事**：历史消息的补跑、以及新消息那一轮的判断。
+   *   如果"一旦有判断就停止等待"，那么补跑先落库、页面刷新后加载态就消失了，
+   *   而**新消息的判断还没回来** —— 用户看到的仍是一张"没反映我这条消息"的卡片，
+   *   于是又得手动刷新（正是之前那个"要刷好几次"的老问题换了个马甲）。
+   */
+  const judgmentStale = Boolean(
+    lastCustomerMessageAt &&
+      (!latestSuggestion || lastCustomerMessageAt > latestSuggestion.createdAt),
+  );
+
+  /**
    * 本轮合并了多少条客户消息 —— 连续消息合并的可见证据。
    * 判据：本次建议绑定的 batchId 下有多少条客户消息。
    */
@@ -198,9 +215,14 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
             waitingForCustomer={waitingForCustomer}
             batchMessageCount={batchMessageCount}
             pending={
-              judgmentWait === 'NONE' ? null : (
-                <JudgmentPending customerId={customer.id} variant={judgmentWait} />
-              )
+              judgmentStale ? (
+                <JudgmentPending
+                  customerId={customer.id}
+                  // 措辞按"到底是什么在跑"来选：历史消息补跑，还是本轮新消息的判断
+                  variant={judgmentWait === 'BACKFILL' ? 'BACKFILL' : 'IN_FLIGHT'}
+                  lastCustomerMessageAt={lastCustomerMessageAt?.toISOString() ?? null}
+                />
+              ) : null
             }
             actions={
               latestSuggestion ? (

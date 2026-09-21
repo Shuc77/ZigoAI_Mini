@@ -370,6 +370,12 @@ export async function runSeed(options: { silent?: boolean } = {}): Promise<SeedS
         lastFollowUpAt: null,
         lastContactAt: lastAnyMessage ? minutesAgo(lastAnyMessage.minutesAgo) : null,
         lastCustomerMessageAt: lastCustomerMessage ? minutesAgo(lastCustomerMessage.minutesAgo) : null,
+        /*
+         * 版本号也归零：重置会删掉该客户的全部判断，如果版本还停在 v7，
+         * 界面上就会出现"状态版本 v7 却没有任何判断"的矛盾数据 —— 演示时很扎眼。
+         * 归零与"还没有任何判断"是自洽的。
+         */
+        version: 0,
       };
 
       await prisma.customerState.upsert({
