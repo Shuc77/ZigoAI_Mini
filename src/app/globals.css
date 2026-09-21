@@ -18,3 +18,43 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/*
+ * 原生下拉框的统一外观。
+ *
+ * 为什么值得单独写：`<select>` 的**展开列表**是操作系统绘制的，CSS 管不到 ——
+ * 能做的只有让**收起状态**看起来像应用的一部分（去掉系统描边与默认箭头，换成自绘箭头、
+ * 与应用一致的圆角与内边距、聚焦时用强调色描边）。这样至少"未展开时"不会显得突兀。
+ * 保留 `appearance: none` 的同时补回 `background-image` 箭头，是为了不丢掉"这是下拉框"的视觉线索。
+ */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 1rem 1rem;
+  padding-right: 2.25rem;
+  cursor: pointer;
+}
+
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* 展开列表里的选项（部分浏览器支持）尽量贴近应用配色 */
+select option {
+  color: #0f172a;
+  background-color: #ffffff;
+}
+
+/* 数字输入框去掉系统上下箭头，避免与自绘控件风格冲突 */
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
