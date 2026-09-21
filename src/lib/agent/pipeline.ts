@@ -249,6 +249,9 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   const handoff = applyHandoffPolicy({
     config: handoffConfig,
     customerMessages: effectiveNewMessages.filter((m) => m.role === 'CUSTOMER').map((m) => m.content),
+    // 把模型的**分类结果**也传进去：need_human 只是一个布尔值，
+    // 而 customer_intent / human_reason / next_action 都可以拿来做交叉验证（见 handoff.ts 第 6 步）
+    aiCustomerIntent: outcome.output.customer_intent,
     aiNeedHuman: outcome.output.need_human,
     aiHumanReason: outcome.output.human_reason ?? null,
     aiNextAction: outcome.output.next_action,

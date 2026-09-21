@@ -754,31 +754,39 @@ console.log('\n核心任务 5 · 企业规则与交接规则');
     }
 
     /*
-     * 自适应窗口的**核心不变量**用相对比较来守：
-     * 同一台机器、同一时刻、同样只有一条消息，只差"这句话是不是问句"。
-     * 绝对耗时会随宿主机负载漂移，但两者的差值稳定地等于窗口之差（8s - 2s = 6s）。
-     * 这条断言守的是销售的真实体感：**客户问了一句话，不该让销售干等 8 秒**。
+     * 自适应窗口的**核心不变量**用"窗口自身的耗时"来守，而不是端到端耗时。
+     *
+     * 为什么：生产上模型耗时波动极大（实测 1.3s ~ 10s+），端到端时间会被它淹没 ——
+     * 线上第一次跑这条断言就出现了"陈述 13.8s / 问句 13.8s"的假象（模型那次特别慢）。
+     * 正确做法是把模型耗时减掉：`elapsedMs - latencyMs` ≈ 窗口 + 兜底扫描 + 轮询粒度，
+     * 这个残差才是"因为窗口而多等的时间"，也是销售真正感知到的那部分。
+     * （latencyMs 自 1.9 起记录的是**响应体读完之后**的真实模型耗时。）
      */
     const statementRun = await sendAndAwaitTimed(lemengCookie, lemengTarget.id, '我考虑一下，回头再说');
     const questionRun = await sendAndAwaitTimed(lemengCookie, lemengTarget.id, '你们周末有课吗？');
-    const faster = statementRun.elapsedMs - questionRun.elapsedMs;
+
+    const residual = (run) => run.elapsedMs - (run.suggestion?.latencyMs ?? 0);
+    const statementWait = residual(statementRun);
+    const questionWait = residual(questionRun);
+    const saved = statementWait - questionWait;
 
     if (
       statementRun.windowMs === 8000 &&
       questionRun.windowMs === 2000 &&
-      // 窗口本身差了 6 秒；模型耗时会有波动，所以只要求"明显更快"（≥2 秒）即可
-      faster >= 2000
+      // 真实差值约 6 秒（8s 窗口 - 2s 窗口）；留一半余量以容忍模型与轮询的抖动
+      saved >= 3000
     ) {
       ok(
         '问句比陈述明显更快（自适应窗口生效）',
-        `陈述 ${(statementRun.elapsedMs / 1000).toFixed(1)}s（窗口 8s） vs ` +
-          `问句 ${(questionRun.elapsedMs / 1000).toFixed(1)}s（窗口 2s），快 ${(faster / 1000).toFixed(1)}s`,
+        `陈述等窗口 ${(statementWait / 1000).toFixed(1)}s（8s 档） vs ` +
+          `问句 ${(questionWait / 1000).toFixed(1)}s（2s 档），少等 ${(saved / 1000).toFixed(1)}s`,
       );
     } else {
       fail(
         '问句没有明显快于陈述',
-        `陈述 ${statementRun.windowMs}ms/${(statementRun.elapsedMs / 1000).toFixed(1)}s，` +
-          `问句 ${questionRun.windowMs}ms/${(questionRun.elapsedMs / 1000).toFixed(1)}s`,
+        `陈述 ${statementRun.windowMs}ms → 窗口耗时 ${(statementWait / 1000).toFixed(1)}s；` +
+          `问句 ${questionRun.windowMs}ms → ${(questionWait / 1000).toFixed(1)}s` +
+          `（模型耗时 ${statementRun.suggestion?.latencyMs}ms / ${questionRun.suggestion?.latencyMs}ms）`,
       );
     }
   }

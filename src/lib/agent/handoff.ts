@@ -1,4 +1,4 @@
-import type { NextAction, HandoffConfig } from '@/lib/types';
+import type { CustomerIntent, NextAction, HandoffConfig } from '@/lib/types';
 import type { StateAdjustment } from './state';
 import type { GuardViolation } from './guards';
 
@@ -23,6 +23,13 @@ import type { GuardViolation } from './guards';
  *
  * 3) **系统兜底不可关闭**：AI 调用异常导致的降级（human_reason = AI 输出异常降级）
  *    永远转人工，任何企业配置都不能把它关掉 —— 否则 AI 挂了还没人管。
+ *
+ * 4) **模型不能自相矛盾**（线上真实踩到的坑，见 `escalateOnSelfContradiction`）：
+ *    有一次生产调用返回了 `customer_intent=投诉`、`next_action=转人工`，但 `need_human=false` ——
+ *    模型自己分类成了投诉、自己也建议转人工，唯独那个布尔值说不用。
+ *    而当时的实现**只信那个布尔值**，于是"我要投诉"没有转人工。
+ *    教训：不要只信模型的一个字段。它的多个结构化输出之间可以交叉验证，
+ *    一旦互相矛盾，就采纳**更保护客户**的那一侧（并记录成可展示的修正）。
  */
 
 const REASON_TO_TRIGGER: Record<string, keyof HandoffConfig['triggers'] | 'ALWAYS'> = {
@@ -34,6 +41,30 @@ const REASON_TO_TRIGGER: Record<string, keyof HandoffConfig['triggers'] | 'ALWAY
   'AI 输出异常降级': 'ALWAYS',
   其他: 'ALWAYS',
 };
+
+/**
+ * 与租户无关的**通用投诉/维权信号词**。
+ *
+ * 定位：企业自配的 `keywords` 是"这家企业特别在意的词"，本表是"任何企业都不该漏掉的底线"
+ * （企业可能漏配「投诉」，但没人会认为投诉可以不用人管）。
+ * 是否升级仍由 `triggers.complaint` 决定 —— 保留企业显式关闭的能力，只是不允许"忘记配置"。
+ */
+const UNIVERSAL_RISK_WORDS = [
+  '投诉',
+  '举报',
+  '12315',
+  '消协',
+  '工商局',
+  '曝光',
+  '起诉',
+  '律师',
+  '差评',
+  '退款',
+  '退费',
+  '退钱',
+  '骗人',
+  '骗子',
+];
 
 /** 因企业配置关闭转人工时，把"转人工"这个动作替换成合理的替代动作 */
 const DOWNGRADE_ACTION: Record<string, NextAction> = {
@@ -57,6 +88,8 @@ export function applyHandoffPolicy(params: {
   config: HandoffConfig;
   /** 本轮客户消息文本（用于敏感词与金额检测） */
   customerMessages: string[];
+  /** AI 对本轮客户意图的**分类结果**（有界枚举，用于交叉验证） */
+  aiCustomerIntent: CustomerIntent;
   aiNeedHuman: boolean;
   aiHumanReason: string | null;
   aiNextAction: NextAction;
@@ -69,6 +102,8 @@ export function applyHandoffPolicy(params: {
   let needHuman = params.aiNeedHuman;
   let humanReason = params.aiHumanReason;
   let nextAction = params.aiNextAction;
+  /** 是否已被"企业配置关闭某类触发"这条路径降级过 —— 降级后不再做自洽性修复 */
+  let downgradedByPolicy = false;
 
   // ---- 1) 规则守护违规：企业红线，直接升级 --------------------------------
   if (params.guardViolations.length > 0 && config.triggers.ruleConflict) {
@@ -101,6 +136,18 @@ export function applyHandoffPolicy(params: {
     }
   }
 
+  // ---- 3.5) 通用投诉场景：确定性识别，不依赖模型的 need_human ----------------
+  // 企业自配词表可能漏配（例如只配了"投诉到总部"而客户说的是"我要投诉"），
+  // 而"投诉必须有人接"是普适底线，所以这里再兜一层通用词。
+  const riskWord = UNIVERSAL_RISK_WORDS.find((word) =>
+    params.customerMessages.some((message) => message.includes(word)),
+  );
+  if (riskWord && config.triggers.complaint && !needHuman) {
+    needHuman = true;
+    humanReason = '客户投诉';
+    notes.push(`客户消息命中通用维权信号「${riskWord}」，按投诉场景转人工（与企业敏感词表叠加的底线保护）`);
+  }
+
   // ---- 4) 企业配置关闭某一类转人工（唯一能"降级"的路径，且必须记录） ------
   if (params.aiNeedHuman && params.aiHumanReason) {
     const triggerKey = REASON_TO_TRIGGER[params.aiHumanReason];
@@ -108,10 +155,12 @@ export function applyHandoffPolicy(params: {
 
     if (!enabled) {
       // 注意：只有在"没有其它升级理由"时才真正降级
-      const escalatedByPolicy = Boolean(hitKeyword) || params.guardViolations.length > 0;
+      const escalatedByPolicy =
+        Boolean(hitKeyword) || params.guardViolations.length > 0 || Boolean(riskWord);
       if (!escalatedByPolicy) {
         needHuman = false;
         humanReason = null;
+        downgradedByPolicy = true;
 
         const replacement = DOWNGRADE_ACTION[params.aiHumanReason];
         if (replacement && nextAction === '转人工') {
@@ -141,6 +190,81 @@ export function applyHandoffPolicy(params: {
       rule: 'HANDOFF_POLICY_ESCALATION',
       note: `按企业交接规则升级为人工介入：${notes.at(-1) ?? humanReason ?? '达到转人工条件'}`,
     });
+  }
+
+  /*
+   * ---- 6) 自洽性兜底：模型不能自相矛盾 ------------------------------------
+   *
+   * 这是线上真实踩到的坑：一次生产调用返回
+   *   customer_intent = 投诉 、 next_action = 转人工 、 need_human = false
+   * —— 模型既把客户分类成投诉，又自己建议转人工，唯独那个布尔值说不用。
+   * 当时的实现只信 need_human，于是「我要投诉」没有转人工（冒烟断言在线上当场报红）。
+   *
+   * 为什么放在最后：企业显式关闭某类触发时，上一步会把 need_human 与 next_action
+   * **一起**改写（不再自相矛盾），那种情况不该被这里再翻回来。
+   * 只有当输出"仍然自相矛盾"时，才采纳更保护客户的一侧 —— 并且留痕，让人看得见。
+   */
+  if (!needHuman && !downgradedByPolicy) {
+    const aiWantsHuman =
+      params.aiCustomerIntent === '投诉' ||
+      params.aiHumanReason !== null ||
+      params.aiNextAction === '转人工' ||
+      Boolean(riskWord);
+
+    /*
+     * 矛盾被归到哪一类，决定要不要尊重企业的关闭开关：
+     *   - 投诉类信号（意图=投诉 / 通用维权词 / 理由=客户投诉）→ 归 complaint
+     *   - 理由能映射到某个企业可配置的类别 → 归该类别
+     *   - 剩下的（模型只说"该转人工"、或系统降级）→ 属**输出自洽性**，不是企业可关闭的类别
+     */
+    const complaintSignal =
+      params.aiCustomerIntent === '投诉' || Boolean(riskWord) || params.aiHumanReason === '客户投诉';
+    const mapped = params.aiHumanReason ? REASON_TO_TRIGGER[params.aiHumanReason] : undefined;
+    const category = complaintSignal
+      ? ('complaint' as const)
+      : mapped && mapped !== 'ALWAYS'
+        ? mapped
+        : null;
+    const categoryDisabled = category !== null && !config.triggers[category];
+
+    const evidence =
+      params.aiCustomerIntent === '投诉'
+        ? 'AI 把客户意图判定为「投诉」'
+        : params.aiHumanReason !== null
+          ? `AI 给出了转人工理由「${params.aiHumanReason}」`
+          : params.aiNextAction === '转人工'
+            ? 'AI 建议的下一步动作是「转人工」'
+            : `客户消息命中通用维权信号「${riskWord}」`;
+
+    if (aiWantsHuman && categoryDisabled) {
+      /*
+       * 企业**显式关闭**了这一类转人工 → 尊重企业配置，但必须把输出改写成自洽的：
+       * 不能出现"状态说不需要人、动作却写着转人工"这种自相矛盾的界面。
+       */
+      const replacement = DOWNGRADE_ACTION[params.aiHumanReason ?? ''] ?? '回答问题';
+      if (nextAction === '转人工') nextAction = replacement;
+      notes.push(`企业交接规则未启用「${category === 'complaint' ? '投诉转人工' : category}」，本轮不升级（动作改为「${replacement}」）`);
+      adjustments.push({
+        field: 'need_human',
+        suggested: 'true',
+        adopted: 'false',
+        rule: 'HANDOFF_POLICY_DISABLED',
+        note: `${evidence}，但本企业未启用该类转人工，故本轮不升级`,
+      });
+    } else if (aiWantsHuman) {
+      needHuman = true;
+      humanReason = params.aiHumanReason ?? (complaintSignal ? '客户投诉' : '其他');
+      if (nextAction !== '转人工') nextAction = '转人工';
+      notes.push(`${evidence}，但 need_human=false —— 输出自相矛盾，系统采纳更保护客户的一侧（转人工）`);
+
+      adjustments.push({
+        field: 'need_human',
+        suggested: 'false',
+        adopted: 'true',
+        rule: 'HANDOFF_SELF_CONTRADICTION',
+        note: `${evidence}，但 AI 同时判断无需人工 —— 两者矛盾时系统按更保护客户的一侧处理`,
+      });
+    }
   }
 
   return { needHuman, humanReason: needHuman ? (humanReason ?? '其他') : null, nextAction, notes, adjustments };

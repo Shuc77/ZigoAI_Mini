@@ -117,14 +117,20 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
     instruction: '不要报价',
   };
 
+  /** 测试默认参数：AI 认为客户在询价、不需要人工 */
+  const base = {
+    aiCustomerIntent: '询价' as const,
+    aiNeedHuman: false,
+    aiHumanReason: null,
+    aiNextAction: '报价' as const,
+    guardViolations: [],
+  };
+
   it('金额达到企业阈值 → 升级人工（乐蒙阈值 5000）', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: { ...DEFAULT_HANDOFF, amountThreshold: 5000 },
       customerMessages: ['年卡 6800 元能便宜点吗？'],
-      aiNeedHuman: false,
-      aiHumanReason: null,
-      aiNextAction: '报价',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(true);
@@ -134,12 +140,9 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('金额未达阈值 → 维持 AI 的判断', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: { ...DEFAULT_HANDOFF, amountThreshold: 5000 },
       customerMessages: ['800 元那档怎么样'],
-      aiNeedHuman: false,
-      aiHumanReason: null,
-      aiNextAction: '报价',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(false);
@@ -148,11 +151,9 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('同一金额在阈值更低的企业会升级（乐蒙 5000 不转、机械之家 1000 转）', () => {
     const input = {
+      ...base,
       customerMessages: ['保费大概 1500 元够吗？'],
-      aiNeedHuman: false,
-      aiHumanReason: null,
       aiNextAction: '回答问题' as const,
-      guardViolations: [],
     };
 
     expect(applyHandoffPolicy({ ...input, config: { ...DEFAULT_HANDOFF, amountThreshold: 1000 } }).needHuman).toBe(true);
@@ -161,12 +162,10 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('命中企业敏感词 → 升级人工', () => {
     const outcome = applyHandoffPolicy({
-      config: { ...DEFAULT_HANDOFF, keywords: ['退费', '起诉'] },
+      ...base,
+      config: { ...DEFAULT_HANDOFF, keywords: ['退费', '起诉'], amountThreshold: null, },
       customerMessages: ['这个课我不上了，我要退费！'],
-      aiNeedHuman: false,
-      aiHumanReason: null,
       aiNextAction: '处理异议',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(true);
@@ -175,11 +174,9 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('规则守护违规 → 强制升级人工', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: DEFAULT_HANDOFF,
       customerMessages: ['多少钱'],
-      aiNeedHuman: false,
-      aiHumanReason: null,
-      aiNextAction: '报价',
       guardViolations: [guardViolation],
     });
 
@@ -189,12 +186,13 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('企业关闭某类触发时，AI 的建议可以被降级（并替换动作）', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: { ...DEFAULT_HANDOFF, triggers: { ...DEFAULT_HANDOFF.triggers, complaint: false } },
       customerMessages: ['教练态度很差'],
+      aiCustomerIntent: '投诉',
       aiNeedHuman: true,
       aiHumanReason: '客户投诉',
       aiNextAction: '转人工',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(false);
@@ -204,6 +202,7 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('企业配置不能关闭系统兜底：AI 异常降级永远转人工', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: {
         ...DEFAULT_HANDOFF,
         triggers: { complaint: false, wantsHuman: false, aiUnsure: false, highValue: false, ruleConflict: false },
@@ -212,7 +211,6 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
       aiNeedHuman: true,
       aiHumanReason: 'AI 输出异常降级',
       aiNextAction: '转人工',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(true);
@@ -220,18 +218,113 @@ describe('applyHandoffPolicy — 交接规则执行', () => {
 
   it('即使企业关闭了「投诉转人工」，命中敏感词仍会升级（企业红线优先）', () => {
     const outcome = applyHandoffPolicy({
+      ...base,
       config: {
         ...DEFAULT_HANDOFF,
         triggers: { ...DEFAULT_HANDOFF.triggers, complaint: false },
         keywords: ['退费'],
       },
       customerMessages: ['我要退费，还要投诉'],
+      aiCustomerIntent: '投诉',
       aiNeedHuman: true,
       aiHumanReason: '客户投诉',
       aiNextAction: '转人工',
-      guardViolations: [],
     });
 
     expect(outcome.needHuman).toBe(true);
+  });
+
+  /*
+   * 以下三条守的是**线上真实踩到的坑**：
+   * 生产上模型返回了 customer_intent=投诉、next_action=转人工，但 need_human=false，
+   * 而当时的实现只信 need_human —— 于是「我要投诉」没有转人工（冒烟断言在线上当场报红）。
+   */
+  describe('自洽性兜底：模型不能自相矛盾', () => {
+    it('意图=投诉 但 need_human=false → 系统按投诉转人工（生产事故复现）', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        // 用的就是线上那条消息
+        customerMessages: ['我要投诉，上次教练态度很差'],
+        aiCustomerIntent: '投诉',
+        aiNextAction: '转人工',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.humanReason).toBe('客户投诉');
+      expect(outcome.nextAction).toBe('转人工');
+      expect(outcome.notes.join(' ')).toContain('投诉');
+    });
+
+    it('消息里没有维权词、只有 AI 分类矛盾时，由自洽性兜底接住', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['上周约的课没人通知我，太不负责了'],
+        aiCustomerIntent: '投诉',
+        aiNextAction: '回答问题',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.humanReason).toBe('客户投诉');
+      expect(outcome.nextAction).toBe('转人工');
+      expect(outcome.adjustments.at(-1)?.rule).toBe('HANDOFF_SELF_CONTRADICTION');
+      expect(outcome.notes.join(' ')).toContain('自相矛盾');
+    });
+
+    it('只说「转人工」却没标 need_human → 同样按更保护客户的一侧处理', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['你们教练太不负责了'],
+        aiNextAction: '转人工',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.notes.join(' ')).toContain('转人工');
+    });
+
+    it('通用维权信号词兜底：企业漏配「投诉」也能兜住', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: { ...DEFAULT_HANDOFF, keywords: ['投诉到总部'], amountThreshold: null },
+        customerMessages: ['我要投诉你们'],
+        aiCustomerIntent: '其他',
+        aiNextAction: '回答问题',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(true);
+      expect(outcome.humanReason).toBe('客户投诉');
+    });
+
+    it('企业显式关闭投诉升级时，不会因为自洽性兜底被翻回来', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: { ...DEFAULT_HANDOFF, triggers: { ...DEFAULT_HANDOFF.triggers, complaint: false } },
+        customerMessages: ['我要投诉你们'],
+        aiCustomerIntent: '投诉',
+        aiNextAction: '转人工',
+        aiNeedHuman: false,
+      });
+
+      expect(outcome.needHuman).toBe(false);
+      expect(outcome.nextAction).not.toBe('转人工');
+    });
+
+    it('输出自洽（询价 + 不转人工 + need_human=false）时不做任何改写', () => {
+      const outcome = applyHandoffPolicy({
+        ...base,
+        config: DEFAULT_HANDOFF,
+        customerMessages: ['你们周末有课吗？'],
+      });
+
+      expect(outcome.needHuman).toBe(false);
+      expect(outcome.adjustments).toHaveLength(0);
+      expect(outcome.notes).toHaveLength(0);
+    });
   });
 });
