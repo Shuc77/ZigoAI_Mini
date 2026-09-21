@@ -6,10 +6,12 @@
 > |---|---|
 > | **线上地址** | http://42.194.164.30:8080 |
 > | **Git 仓库** | https://github.com/Shuc77/ZigoAI_Mini |
-> | **Final Commit** | `890dcb8`（提交前会更新为最终 hash） |
+> | **Final Commit** | 以 tag `final-submit` 指向的提交为准（便于定位，不受后续文档改动影响） |
 > | **测试账号** | 见下方「测试账号」一节，密码统一 `Zigo@2026` |
 >
-> **建议阅读顺序**：本文件 → `docs/USER_MANUAL.md`（使用与验收手册，含 58 条测试用例与 12 分钟演示脚本）→ `docs/DELIVERY_LOG.md`（每个功能点的设计取舍、踩坑记录与答辩话术）
+> **建议阅读顺序**：本文件 → `docs/USER_MANUAL.md`（使用与验收手册，含 58 条测试用例与 12 分钟演示脚本）→ `docs/DEFENSE.md`（答辩卡与现场实战演练）→ `docs/DELIVERY_LOG.md`（每个功能点的设计取舍、踩坑记录与答辩话术）
+>
+> **验证方式**：`pnpm test`（39 项单元测试）+ `node scripts/smoke.mjs`（46 项端到端）+ `node scripts/e2e-browser.mjs`（16 项真实浏览器）—— 三层共 **101 项断言**，均已对线上地址验证通过。
 
 ---
 
