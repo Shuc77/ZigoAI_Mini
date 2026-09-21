@@ -177,7 +177,7 @@ erDiagram
         string email UK
         string name
         string passwordHash "scrypt"
-        enum role "SALES | MANAGER"
+        string role "SALES | MANAGER"
     }
 
     Customer {
@@ -194,7 +194,7 @@ erDiagram
         string id PK
         string tenantId FK
         string customerId FK
-        enum role "CUSTOMER | SALES"
+        string role "CUSTOMER | SALES"
         string content
         string senderUserId FK "SALES 消息才有"
         string batchId "连续消息合并"
@@ -203,8 +203,8 @@ erDiagram
 
     CustomerState {
         string id PK
-        string customerId FK_UK "一客户一状态"
-        enum leadStage "NEW→DISCOVERY→INTERESTED→HIGH_INTENT→WON/LOST"
+        string customerId UK "一客户一状态"
+        string leadStage "NEW→DISCOVERY→INTERESTED→HIGH_INTENT→WON/LOST"
         string intent
         bool needHuman "只升不降，只能人工解除"
         string humanReason
@@ -219,7 +219,7 @@ erDiagram
         string customerId FK
         string batchId "一批次一次判断"
         string customerIntent "六个必需输出字段之一"
-        enum leadStage
+        string leadStage
         string nextAction
         string reply "建议回复"
         string reason "判断依据"
@@ -228,7 +228,7 @@ erDiagram
         json stateAdjustments "系统改写了什么"
         json handoffNotes "为什么升级人工"
         string ruleViolation "规则守护发现的违规"
-        enum status "SUCCESS | RETRY_OK | FALLBACK | ERROR"
+        string status "SUCCESS | RETRY_OK | FALLBACK | ERROR"
         string trigger "NEW_MESSAGE | REGENERATE | FOLLOW_UP | INITIAL_BACKFILL"
         json rawRequest "送进模型的原文（可回放）"
         json rawResponse "模型原始输出"
@@ -245,7 +245,7 @@ erDiagram
         string tenantId FK
         string customerId FK
         int attempt "幂等键（单调递增）"
-        enum status "PENDING | SENT | SKIPPED | CANCELLED"
+        string status "PENDING | SENT | SKIPPED | CANCELLED"
         datetime dueAt
         string reason
         string suggestionId FK "生成出来的跟进建议"
