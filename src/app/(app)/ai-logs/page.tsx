@@ -173,7 +173,7 @@ export default async function AiLogsPage() {
                     <td className="px-3 py-2 whitespace-nowrap text-slate-500">
                       {/* 单价未配置时不能显示 ¥0.0000 —— 那看起来像"不花钱"，实际是"没算" */}
                       {cost.estimatedCostCny > 0 ? (
-                        `¥${call.estimatedCostCny.toFixed(4)}`
+                        `¥${(call.estimatedCostCny ?? 0).toFixed(4)}`
                       ) : (
                         <span className="text-slate-400" title="在 .env 里配置 DEEPSEEK_PRICE_IN_PER_MTOK / _OUT_ 后即可算出金额">
                           未配置单价
