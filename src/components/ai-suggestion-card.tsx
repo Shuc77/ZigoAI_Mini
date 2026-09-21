@@ -5,7 +5,19 @@ import { parseAdjustments } from '@/lib/agent/state';
 
 /**
  * AI 判断卡片：把"模型说了什么"和"系统采纳了什么"分开呈现。
- * 这张卡片是整个产品的核心界面 —— 销售看到的是判断 + 理由 + 可直接发送的话。
+ *
+ * ## 信息架构（一次真实的可用性返工）
+ *
+ * 原版把意图/阶段/动作/依据/规则/修正/token/耗时平铺在一张卡上，销售要读完一大段分析
+ * 才知道"我该不该发这句话"。但销售的决策其实只有两个：**这句发不发**、**要不要人来**。
+ * 其余信息是给主管和开发者看的（审计、排障、答辩）。
+ *
+ * 所以现在分两层：
+ *   - **主区域（销售的视线）**：需不需要人 → 一行结论摘要 → 建议回复 + 发送按钮
+ *   - **折叠区「为什么这么判断？」（想深究的人点开）**：依据、规则、系统修正、审计字段
+ *
+ * 折叠用的是原生 `<details>`：服务端渲染、无 JS 状态、键盘可用 —— 演示时点一下就能展开，
+ * 不需要额外的交互代码。
  */
 
 /**
@@ -17,6 +29,14 @@ const STATUS_STYLES: Record<string, { label: string; className: string; hint: st
   RETRY_OK: { label: '重试后成功', className: 'border-sky-200 bg-sky-50 text-sky-700', hint: '首次调用不合格，带错误信息重试后成功' },
   FALLBACK: { label: '已降级为人工', className: 'border-amber-200 bg-amber-50 text-amber-700', hint: 'AI 未能给出有效判断，已自动降级为人工跟进' },
   ERROR: { label: '调用失败', className: 'border-rose-200 bg-rose-50 text-rose-700', hint: 'AI 调用失败' },
+};
+
+/** 判断是怎么被触发的 —— 它决定这段话该不该信任、以及"为什么现在是它" */
+const TRIGGER_LABELS: Record<string, string> = {
+  NEW_MESSAGE: '客户发来新消息',
+  REGENERATE: '销售手动重新判断',
+  FOLLOW_UP: '客户静默超时，系统主动跟进',
+  INITIAL_BACKFILL: '首次判断补跑（历史消息此前没被判断过）',
 };
 
 export function AiSuggestionCard({
@@ -61,7 +81,6 @@ export function AiSuggestionCard({
 
   // AI 原始建议 vs 系统采纳：把落差就地展示，避免"看起来自相矛盾"
   const stageAdjustment = adjustments.find((a) => a.field === 'lead_stage');
-  const humanAdjustment = adjustments.find((a) => a.field === 'need_human');
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white">
@@ -72,7 +91,15 @@ export function AiSuggestionCard({
         </span>
       </div>
 
-      <div className="space-y-3 px-4 py-3 text-sm">
+      {/* ---------------- 主区域：销售只需要看这一块 ---------------- */}
+      <div className="space-y-3 px-4 py-3">
+        {suggestion.needHuman ? (
+          <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-800">
+            <span className="font-medium">建议人工介入</span>
+            {suggestion.humanReason ? <span>：{suggestion.humanReason}</span> : null}
+          </div>
+        ) : null}
+
         {waitingForCustomer ? (
           <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
             <span className="font-medium">已回复客户，正在等待客户回应。</span>
@@ -80,16 +107,23 @@ export function AiSuggestionCard({
           </div>
         ) : null}
 
-        <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
-          <span>{formatDateTime(suggestion.createdAt)}</span>
-          <span>{suggestion.model}</span>
-          {suggestion.latencyMs !== null ? <span>{suggestion.latencyMs}ms</span> : null}
-          {suggestion.promptTokens !== null ? (
-            <span>
-              tokens {suggestion.promptTokens}+{suggestion.completionTokens ?? 0}
-            </span>
+        {/* 一行说清"系统读懂了什么"：三个关键结论，不占地方但随时可见 */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+          <span>
+            客户意图 <span className="font-medium text-slate-900">{suggestion.customerIntent}</span>
+          </span>
+          <span className="text-slate-300">|</span>
+          <span>
+            阶段{' '}
+            <span className="font-medium text-slate-900">{LEAD_STAGE_LABELS[suggestion.leadStage]}</span>
+          </span>
+          <span className="text-slate-300">|</span>
+          <span>
+            下一步 <span className="font-medium text-slate-900">{suggestion.nextAction}</span>
+          </span>
+          {stageAdjustment ? (
+            <span className="text-[11px] text-amber-700">（AI 原建议的阶段被系统拦住）</span>
           ) : null}
-          <span>prompt {suggestion.promptVersion}</span>
         </div>
 
         {suggestion.trigger === 'INITIAL_BACKFILL' ? (
@@ -113,60 +147,6 @@ export function AiSuggestionCard({
           </div>
         ) : null}
 
-        <dl className="grid grid-cols-3 gap-2 text-xs">
-          <div className="rounded-lg bg-slate-50 px-2.5 py-2">
-            <dt className="text-slate-500">客户意图</dt>
-            <dd className="mt-0.5 font-medium text-slate-900">
-              {suggestion.customerIntent}
-              {suggestion.intentDetail ? (
-                <span className="ml-1 font-normal text-slate-500">· {suggestion.intentDetail}</span>
-              ) : null}
-            </dd>
-          </div>
-          <div className="rounded-lg bg-slate-50 px-2.5 py-2">
-            <dt className="text-slate-500">销售阶段</dt>
-            <dd className="mt-0.5 font-medium text-slate-900">
-              {LEAD_STAGE_LABELS[suggestion.leadStage]}
-            </dd>
-            {stageAdjustment ? (
-              <dd className="mt-0.5 text-[10px] text-amber-700">
-                AI 原建议「{LEAD_STAGE_LABELS[stageAdjustment.suggested as keyof typeof LEAD_STAGE_LABELS] ?? stageAdjustment.suggested}」被系统拦住
-              </dd>
-            ) : null}
-          </div>
-          <div className="rounded-lg bg-slate-50 px-2.5 py-2">
-            <dt className="text-slate-500">下一步动作</dt>
-            <dd className="mt-0.5 font-medium text-slate-900">{suggestion.nextAction}</dd>
-          </div>
-        </dl>
-
-        {rulesApplied.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5 text-xs">
-            <span className="text-slate-500">引用企业规则：</span>
-            {rulesApplied.map((id) => (
-              <span
-                key={id}
-                title={ruleById.get(id) ?? '未找到该规则'}
-                className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700"
-              >
-                {id}
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        {suggestion.needHuman ? (
-          <div className="rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-xs text-orange-800">
-            <span className="font-medium">建议人工介入</span>
-            {suggestion.humanReason ? <span>：{suggestion.humanReason}</span> : null}
-          </div>
-        ) : null}
-
-        <div>
-          <div className="mb-1 text-xs text-slate-500">判断依据</div>
-          <p className="prewrap text-xs leading-relaxed text-slate-700">{suggestion.reason}</p>
-        </div>
-
         <div>
           <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
             <span>建议回复</span>
@@ -176,41 +156,100 @@ export function AiSuggestionCard({
               </span>
             ) : null}
           </div>
-          <div className="prewrap rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2 text-sm leading-relaxed text-slate-800">
+          <div className="prewrap rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2.5 text-[15px] leading-relaxed text-slate-900">
             {suggestion.reply}
           </div>
+        </div>
+
+        {/* 发送 / 改一下再发 / 重新生成 —— 紧贴建议回复，销售不用找 */}
+        {actions}
+      </div>
+
+      {/* ---------------- 折叠区：想深究的人点开 ---------------- */}
+      <details className="group border-t border-slate-100">
+        <summary
+          data-testid="suggestion-why"
+          className="cursor-pointer list-none px-4 py-2.5 text-xs text-slate-500 hover:bg-slate-50 hover:text-slate-700"
+        >
+          <span className="inline-block transition group-open:rotate-90">▸</span> 为什么这么判断？（依据 / 企业规则 /
+          系统修正 / 审计信息）
+        </summary>
+
+        <div className="space-y-3 border-t border-slate-100 px-4 py-3 text-sm">
+          <div className="text-[11px] text-slate-500">
+            判断来源：{TRIGGER_LABELS[suggestion.trigger] ?? suggestion.trigger}
+          </div>
+
+          <div>
+            <div className="mb-1 text-xs text-slate-500">判断依据</div>
+            <p className="prewrap text-xs leading-relaxed text-slate-700">{suggestion.reason}</p>
+          </div>
+
+          {rulesApplied.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-slate-500">引用企业规则：</span>
+              {rulesApplied.map((id) => (
+                <span
+                  key={id}
+                  title={ruleById.get(id) ?? '未找到该规则'}
+                  className="rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 font-medium text-indigo-700"
+                >
+                  {id}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {adjustments.length > 0 ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="mb-1 text-xs font-medium text-slate-600">系统对 AI 建议的修正</div>
+              <ul className="space-y-1 text-[11px] text-slate-600">
+                {adjustments.map((adjustment, index) => (
+                  <li key={`${adjustment.rule}-${index}`}>
+                    <span className="font-medium">{adjustment.field}</span>：AI 建议「{adjustment.suggested}」→
+                    采纳「{adjustment.adopted}」（{adjustment.note}）
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           {suggestion.sentMessageId && suggestion.finalReply && suggestion.finalReply !== suggestion.reply ? (
-            <div className="mt-2">
+            <div>
               <div className="mb-1 text-xs text-slate-500">销售实际发送</div>
               <div className="prewrap rounded-lg border border-emerald-100 bg-emerald-50/60 px-3 py-2 text-sm leading-relaxed text-slate-800">
                 {suggestion.finalReply}
               </div>
             </div>
           ) : null}
+
+          {suggestion.ruleViolation ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              规则守护提示：{suggestion.ruleViolation}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+            <span>{formatDateTime(suggestion.createdAt)}</span>
+            <span>{suggestion.model}</span>
+            {suggestion.latencyMs !== null ? <span>模型耗时 {suggestion.latencyMs}ms</span> : null}
+            {suggestion.promptTokens !== null ? (
+              <span>
+                tokens {suggestion.promptTokens}+{suggestion.completionTokens ?? 0}
+              </span>
+            ) : null}
+            <span>prompt {suggestion.promptVersion}</span>
+          </div>
+
+          {/* 从"销售看到的结论"通向"这次判断的完整链路"——审计信息不该挤占销售视线，但必须够得着 */}
+          <a
+            href={`/ai-logs/${suggestion.id}`}
+            className="inline-block text-[11px] font-medium text-indigo-600 hover:text-indigo-700"
+          >
+            查看这次判断的完整链路（分段耗时 / 送进模型的原文 / 模型原始输出）→
+          </a>
         </div>
-
-        {adjustments.length > 0 ? (
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-            <div className="mb-1 text-xs font-medium text-slate-600">系统对 AI 建议的修正</div>
-            <ul className="space-y-1 text-[11px] text-slate-600">
-              {adjustments.map((adjustment, index) => (
-                <li key={`${adjustment.rule}-${index}`}>
-                  <span className="font-medium">{adjustment.field}</span>：AI 建议「{adjustment.suggested}」→
-                  采纳「{adjustment.adopted}」（{adjustment.note}）
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
-
-        {suggestion.ruleViolation ? (
-          <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
-            规则守护提示：{suggestion.ruleViolation}
-          </div>
-        ) : null}
-
-        {actions}
-      </div>
+      </details>
     </div>
   );
 }

@@ -33,7 +33,10 @@ export type LlmResult = {
   ok: boolean;
   content: string | null;
   model: string;
+  /** **模型真实耗时**：响应体读完之后才算（首字节到达时间见 ttfbMs） */
   latencyMs: number;
+  /** 首字节时间（TTFB）—— 与 latencyMs 的差值就是模型"生成"的时间 */
+  ttfbMs?: number;
   usage: LlmUsage;
   rawRequest: unknown;
   rawResponse: unknown;
@@ -161,6 +164,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       content: null,
       model,
       latencyMs: fullLatencyMs,
+      ttfbMs,
       usage: EMPTY_USAGE,
       rawRequest,
       rawResponse: text.slice(0, 2000),
@@ -197,6 +201,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       content: null,
       model,
       latencyMs: fullLatencyMs,
+      ttfbMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -219,6 +224,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       content,
       model,
       latencyMs: fullLatencyMs,
+      ttfbMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -236,6 +242,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
       content: null,
       model,
       latencyMs: fullLatencyMs,
+      ttfbMs,
       usage,
       rawRequest,
       rawResponse: payload,
@@ -254,6 +261,7 @@ export async function callDeepSeekJson(request: LlmJsonRequest): Promise<LlmResu
     content,
     model,
     latencyMs: fullLatencyMs,
+      ttfbMs,
     usage,
     rawRequest,
     rawResponse: payload,

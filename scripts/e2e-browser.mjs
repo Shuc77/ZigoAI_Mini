@@ -409,6 +409,90 @@ try {
       } else {
         fail('投诉未升级为人工介入', escalateText.replace(/\s+/g, ' ').trim() || '未读到状态卡');
       }
+
+      /*
+       * ---- 12. 卡片信息架构：销售的视线里只留"发不发" ----
+       * 主区域应当只有：判断结论一行 + 建议回复 + 发送按钮；
+       * 依据 / 规则 / 系统修正 / 审计字段收进「为什么这么判断？」折叠区，点开仍然看得到。
+       */
+      const replyVisible = await page
+        .locator('text=建议回复')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      const sendVisible = await page.getByTestId('suggestion-send').isVisible().catch(() => false);
+      if (replyVisible && sendVisible) {
+        ok('卡片主区域只留结论与动作', '建议回复与发送按钮同屏可见，销售不用翻找');
+      } else {
+        fail('卡片主区域缺少关键动作', `建议回复 ${replyVisible ? '在' : '不在'}，发送按钮 ${sendVisible ? '在' : '不在'}`);
+      }
+
+      try {
+        // 折叠区：点开后必须能看到"判断依据"
+        const why = page.getByTestId('suggestion-why').first();
+        await why.scrollIntoViewIfNeeded();
+        await why.click();
+        await page.locator('text=判断依据').first().waitFor({ timeout: 15_000 });
+        ok('「为什么这么判断？」可展开', '依据 / 企业规则 / 系统修正 / 审计信息都在折叠区里');
+      } catch (error) {
+        fail('折叠区打不开', String(error.message ?? error).split('\n')[0]);
+      }
+
+      /* ---- 13. 判断链路详情页（③） ---- */
+      try {
+        const traceLink = page.locator('a', { hasText: '查看这次判断的完整链路' }).first();
+        await traceLink.scrollIntoViewIfNeeded();
+        const [tracePage] = await Promise.all([page.waitForEvent('popup', { timeout: 15_000 }).catch(() => null), traceLink.click()]);
+
+        if (tracePage) {
+          await tracePage.waitForLoadState('domcontentloaded');
+          const traceText = (await tracePage.locator('body').textContent()) ?? '';
+          const hasStages = traceText.includes('环节耗时') && traceText.includes('总耗时');
+          const hasPrompt = traceText.includes('模型收到的 prompt') && traceText.includes('模型的原始输出');
+          if (hasStages && hasPrompt) {
+            ok('判断链路页可打开且信息完整', '分段耗时 + 送进模型的原文 + 模型原始输出');
+          } else {
+            fail('链路页信息不完整', `分段耗时=${hasStages}，原文=${hasPrompt}`);
+          }
+          await tracePage.close();
+        } else {
+          // 同一个标签页打开的情况
+          await page.waitForLoadState('domcontentloaded');
+          const text = (await page.locator('body').textContent()) ?? '';
+          if (text.includes('环节耗时')) ok('判断链路页可打开', '含分段耗时');
+          else fail('未进入链路页', page.url());
+        }
+      } catch (error) {
+        fail('链路页访问失败', String(error.message ?? error).split('\n')[0]);
+      }
+
+      /* ---- 14. 待办队列（②）：列表页应当把"该处理谁"排出来 ---- */
+      try {
+        await page.goto(`${baseUrl}/customers`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('table tbody tr', { timeout: 20_000 });
+
+        const needHumanCount = Number(
+          ((await page.getByTestId('queue-need-human').textContent()) ?? '0').trim(),
+        );
+        const actionable = Number(
+          ((await page.getByTestId('queue-actionable').textContent()) ?? '0').trim(),
+        );
+        if (needHumanCount >= 1 && actionable >= 1) {
+          ok('客户列表给出待办汇总', `需要人工 ${needHumanCount} 位，待办合计 ${actionable} 位`);
+        } else {
+          fail('待办汇总不正确', `需要人工 ${needHumanCount}，待办 ${actionable}`);
+        }
+
+        // 刚刚投诉过的张女士必须排在第一位（优先级 0）
+        const firstRow = ((await page.locator('table tbody tr').first().textContent()) ?? '').replace(/\s+/g, ' ');
+        if (firstRow.includes('张女士') && firstRow.includes('需要人工')) {
+          ok('需要人工的客户被排在队首', firstRow.slice(0, 60));
+        } else {
+          fail('待办排序没有把需人工的客户置顶', firstRow.slice(0, 80));
+        }
+      } catch (error) {
+        fail('待办队列检查失败', String(error.message ?? error).split('\n')[0]);
+      }
     }
   } else {
     console.log('  · 跳过"重置后加载态"检查（未提供 --seed-token=<口令> 或 SEED_TOKEN）');

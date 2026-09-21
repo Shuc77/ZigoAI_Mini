@@ -26,6 +26,24 @@ export async function listSuggestions(ctx: AuthContext, customerId: string, limi
   });
 }
 
+/**
+ * 按 id 取一次判断（链路详情页用）。
+ *
+ * 这里是**直接按主键 + 租户作用域**查，不经过 requireCustomer —— 因为链路详情页
+ * 只需要"这次调用"，不需要客户详情；但租户作用域一步都不能少，
+ * 越权一律返回 null → 页面 404（不暴露"存在但不属于你"）。
+ */
+export async function findSuggestionById(ctx: AuthContext, suggestionId: string) {
+  return prisma.aiSuggestion.findFirst({
+    where: { id: suggestionId, tenantId: ctx.tenantId },
+    include: {
+      customer: {
+        select: { id: true, name: true, handle: true, assignee: { select: { name: true } } },
+      },
+    },
+  });
+}
+
 /** AI 调用审计列表（AI 日志页用）：本企业最近若干次调用 */
 export async function listRecentAiCalls(ctx: AuthContext, limit = 50) {
   return prisma.aiSuggestion.findMany({

@@ -192,6 +192,8 @@ model AiSuggestion {
   promptVersion  String
   rawRequest     Json?
   rawResponse    Json?
+  /// 判断链路（trace）：分段耗时 + 每一步的输入输出，供页面展示"这次判断怎么来的、慢在哪"
+  pipelineTrace  Json?
   latencyMs      Int?
   promptTokens   Int?
   completionTokens Int?

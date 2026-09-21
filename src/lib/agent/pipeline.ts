@@ -199,6 +199,8 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
   let guardViolations: GuardViolation[] = [];
   let guardRetries = 0;
   const contextLoadedAt = Date.now();
+  /** 组装提示词与调模型的耗时（模型调用是其中大头，见 llm.latencyMs） */
+  const promptStartedAt = Date.now();
 
   for (;;) {
     const { system, user } = buildAgentPrompt({ ...basePromptContext, extraInstruction });
@@ -244,6 +246,7 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
 
   if (!outcome) throw new Error('AI 调用未产生结果');
   const modelDoneAt = Date.now();
+  void promptStartedAt;
 
   // ---------- ⑥ 交接规则：本轮是否需要人工 ----------
   const handoff = applyHandoffPolicy({
@@ -336,6 +339,67 @@ export async function runAgent(input: RunAgentInput): Promise<RunAgentResult> {
     handoffNotes: handoff.notes,
     ruleViolation,
     expectedVersion: currentState.version,
+    /*
+     * 判断链路（trace）：把"这次判断是怎么来的"落库，让页面能像看调用链一样展开，
+     * 而不是只能翻容器日志。分段耗时的意义在 M9 已经证明过：
+     * 客户抱怨"要等 8 秒"时，第一反应是模型慢 —— 实测模型只占一小部分，大头是聚合窗口与落库。
+     */
+    trace: {
+      totalMs: Date.now() - startedAt,
+      stages: [
+        {
+          key: 'context',
+          label: '载入上下文',
+          ms: contextLoadedAt - startedAt,
+          detail: `历史消息 ${historyRows.length} 条（上限 ${HISTORY_LIMIT}）+ 本轮新消息 ${effectiveNewMessages.length} 条 + 企业规则 ${tenantRules.length} 条`,
+        },
+        {
+          key: 'model',
+          label: '组装提示词并调用模型',
+          ms: modelDoneAt - contextLoadedAt,
+          detail: `模型自身耗时 ${outcome.llm?.latencyMs ?? 0}ms（含推理 token），共 ${outcome.attempts} 次调用`,
+        },
+        {
+          key: 'guards',
+          label: '状态机裁决 + 规则守护 + 交接策略',
+          ms: 0,
+          detail: `规则守护 ${guardViolations.length} 处违规、重写 ${guardRetries} 次；交接规则${handoff.needHuman ? '升级人工' : '未升级'}`,
+        },
+        {
+          key: 'persist',
+          label: '写入建议 + 乐观锁更新客户状态',
+          ms: Date.now() - modelDoneAt,
+          detail: `状态版本 v${currentState.version} → v${currentState.version + 1}`,
+        },
+      ],
+      model: {
+        attempts: outcome.attempts,
+        maxTokens: BASE_MAX_TOKENS,
+        finishReason: outcome.llm?.finishReason ?? null,
+        ttfbMs: outcome.llm?.ttfbMs ?? null,
+        errorKinds: outcome.errors,
+      },
+      context: {
+        historyMessages: historyRows.length,
+        newMessages: effectiveNewMessages.length,
+        rulesCount: tenantRules.length,
+        handoffKeywords: handoffConfig.keywords.length,
+      },
+      guards: {
+        violations: guardViolations.map((v) => ({ ruleId: v.ruleId, message: v.message })),
+        retries: guardRetries,
+      },
+      handoff: {
+        needHuman: handoff.needHuman,
+        reason: handoff.humanReason,
+        notes: handoff.notes,
+      },
+      state: {
+        from: currentState.leadStage,
+        to: finalState.leadStage,
+        adjustments: adjustments.map((a) => ({ field: a.field, rule: a.rule })),
+      },
+    },
   });
 
   /*
@@ -485,6 +549,8 @@ async function persistWithOptimisticLock(params: {
   handoffNotes: string[];
   ruleViolation: string | null;
   expectedVersion: number;
+  /** 判断链路：分段耗时与每一步的输入输出（供页面展示，不参与任何业务判断） */
+  trace?: Record<string, unknown>;
 }): Promise<{ suggestion: AiSuggestion; state: { leadStage: string; intent: string; needHuman: boolean; version: number } }> {
   const { ctx } = params.input;
   let expectedVersion = params.expectedVersion;
@@ -519,6 +585,7 @@ async function persistWithOptimisticLock(params: {
             promptVersion: PROMPT_VERSION,
             rawRequest: (params.outcome.llm?.rawRequest ?? null) as unknown as Prisma.InputJsonValue,
             rawResponse: (params.outcome.llm?.rawResponse ?? null) as unknown as Prisma.InputJsonValue,
+            pipelineTrace: (params.trace ?? null) as unknown as Prisma.InputJsonValue,
             latencyMs: params.outcome.llm?.latencyMs ?? null,
             promptTokens: params.outcome.llm?.usage.promptTokens ?? null,
             completionTokens: params.outcome.llm?.usage.completionTokens ?? null,

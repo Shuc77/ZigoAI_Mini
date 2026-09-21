@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import { formatDateTime, formatRelative } from '@/lib/format';
 import { LEAD_STAGE_LABELS } from '@/lib/types';
 import { requirePageAuth } from '@/server/auth';
@@ -101,6 +103,7 @@ export default async function AiLogsPage() {
                 <th className="px-3 py-2 font-medium">Tokens</th>
                 <th className="px-3 py-2 font-medium">成本</th>
                 <th className="px-3 py-2 font-medium">规则守护</th>
+                <th className="px-3 py-2 font-medium">链路</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -155,12 +158,20 @@ export default async function AiLogsPage() {
                         <span className="text-slate-300">—</span>
                       )}
                     </td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <Link
+                        href={`/ai-logs/${call.id}`}
+                        className="font-medium text-indigo-600 hover:text-indigo-700"
+                      >
+                        查看链路 →
+                      </Link>
+                    </td>
                   </tr>
                 );
               })}
               {calls.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="px-3 py-10 text-center text-sm text-slate-400">
+                  <td colSpan={12} className="px-3 py-10 text-center text-sm text-slate-400">
                     还没有 AI 调用记录
                   </td>
                 </tr>
@@ -175,6 +186,10 @@ export default async function AiLogsPage() {
         <ul className="list-inside list-disc space-y-0.5">
           <li>状态列出现「已降级」：说明那次 AI 调用失败，系统按兜底话术转人工 —— 点开 `AiSuggestion.errorMessage` 能看到具体原因</li>
           <li>耗时异常高：多半是输出被截断后放大了 `max_tokens` 重试（见「重试 n」标记）</li>
+          <li>
+            「耗时」列记录的是**模型真实耗时**（响应体读完才计时）。想知道时间具体花在哪 ——
+            窗口、模型生成、还是落库 —— 点每一行的「查看链路 →」，那里有分段耗时与完整原文
+          </li>
           <li>「人工修改率」偏高：不是 bug，而是产品信号 —— 说明建议不贴业务，应该回到企业规则页补规则或补示例</li>
         </ul>
       </div>

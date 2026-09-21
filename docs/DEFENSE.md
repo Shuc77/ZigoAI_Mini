@@ -58,11 +58,11 @@ src/lib/agent/pipeline.ts  runAgent()   ← 主干（唯一入口）
 
 | 层 | 文件 | 数量 |
 |---|---|---|
-| 单元测试 | `tests/state-machine.test.ts`、`followup-rules.test.ts`、`rules-and-handoff.test.ts`、`batch-window.test.ts` | 56 项 |
+| 单元测试 | `state-machine` / `followup-rules` / `rules-and-handoff` / `batch-window` / `customer-queue` | 65 项 |
 | Node 端到端 | `scripts/smoke.mjs` | 56 项 |
-| 真实浏览器 | `scripts/e2e-browser.mjs` | 23 项 |
+| 真实浏览器 | `scripts/e2e-browser.mjs` | 31 项 |
 
-> 三层合计 **135 项断言**。密集回归阶段一条命令跑完：`pnpm test` → `node scripts/smoke.mjs <url> --deepseek --seed-token=<口令>` → `node scripts/e2e-browser.mjs <url> --seed-token=<口令>`。
+> 三层合计 **152 项断言**。密集回归阶段一条命令跑完：`pnpm test` → `node scripts/smoke.mjs <url> --deepseek --seed-token=<口令>` → `node scripts/e2e-browser.mjs <url> --seed-token=<口令>`。
 
 ---
 
