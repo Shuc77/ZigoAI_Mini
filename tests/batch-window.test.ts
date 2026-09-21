@@ -47,6 +47,15 @@ describe('looksLikeQuestion', () => {
     expect(looksLikeQuestion('贵不贵呢')).toBe(true);
   });
 
+  it('疑问句的判据不锚定结尾（真实踩到的坑）', () => {
+    // 客户发的是「没有什么补偿？白白等了一周」—— 问号在中间，结尾是陈述
+    expect(looksLikeQuestion('没有什么补偿？白白等了一周')).toBe(true);
+    expect(looksLikeQuestion('你们几点开门？我下午过去')).toBe(true);
+    // 索要说法 / 谈条件也属于"在等回应"
+    expect(looksLikeQuestion('白白等了一周，总得给个说法')).toBe(true);
+    expect(looksLikeQuestion('能不能便宜点')).toBe(true);
+  });
+
   it('陈述句不误判（宁可退回长窗口，也不要抢答）', () => {
     expect(looksLikeQuestion('我考虑一下')).toBe(false);
     expect(looksLikeQuestion('昨天去看了别家的课')).toBe(false);

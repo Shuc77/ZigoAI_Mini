@@ -23,8 +23,19 @@
 export type BatchWindowReason = 'QUESTION' | 'FOLLOW_UP' | 'STATEMENT';
 
 /**
- * "客户在等一个答案"的信号词。
- * 只做**保守**匹配：宁可漏判（退回长窗口），也不要把陈述句误判成问句而提前抢答。
+ * 疑问语气：问号**出现在任意位置**，或结尾是"吗/呢/么"这类疑问助词。
+ *
+ * 为什么问号不能只看结尾（真实踩到的坑）：
+ *   客户发「没有什么补偿？白白等了一周」—— 问号在**中间**，结尾是陈述句。
+ *   只锚定结尾的写法会把它判成"陈述"，于是给 8 秒窗口，而客户其实正在等答复。
+ *   误判成问句的代价很小（窗口短一点，下一条消息会重置），漏判的代价却是销售干等。
+ */
+const QUESTION_MARK = /[?？]/;
+const QUESTION_TAIL = /[吗呢么]$/;
+
+/**
+ * "客户在等一个答案"的信号词（在整个句子里匹配，不锚定位置）。
+ * 只做**保守**添加：宁可漏判（退回长窗口），也不要把纯陈述误判成问句而提前抢答。
  */
 const INTENT_PATTERNS: readonly RegExp[] = [
   /多少(钱|费用)?/,
@@ -36,19 +47,15 @@ const INTENT_PATTERNS: readonly RegExp[] = [
   /有(人|货|位|名额|课|空|时间)吗/,
   /在(吗|么|不在)/,
   /贵(吗|不贵)/,
+  // 索要说法 / 谈条件：客户提出这类要求时，同样是在等一个回应
+  /补偿|赔偿|说法|优惠|折扣|打折|便宜(点|些)?/,
 ];
 
-/**
- * 结尾的疑问语气：问号，或"吗/呢/么"这类疑问助词。
- * 中文里"你们周末有课吗"常常不带问号，所以不能只看标点。
- */
-const QUESTION_TAIL = /[?？吗呢么]$/;
-
-/** 结尾是问号 / 疑问助词，或命中明确诉求词 → 客户在等一个答案 */
+/** 客户在等一个答案吗（问号任意位置 / 疑问助词结尾 / 命中诉求词） */
 export function looksLikeQuestion(content: string): boolean {
   const text = content.trim();
   if (!text) return false;
-  if (QUESTION_TAIL.test(text)) return true;
+  if (QUESTION_MARK.test(text) || QUESTION_TAIL.test(text)) return true;
   return INTENT_PATTERNS.some((pattern) => pattern.test(text));
 }
 
