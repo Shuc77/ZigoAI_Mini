@@ -141,7 +141,133 @@ having count(m.id) > 0
    and not exists (select 1 from "AiSuggestion" s where s."customerId" = c.id);
 ```
 
-## 6. 一个已知缺口（主动交代）
+## 6. ER 图（Mermaid，GitHub 上可直接渲染）
+
+> 不需要连数据库 —— 这份图与 `schema.prisma` 同源。
+> 为了可读性只列**关键字段**，完整定义（类型、默认值、注释）以 `schema.prisma` 为准。
+
+```mermaid
+erDiagram
+    Tenant ||--o{ User : "拥有账号"
+    Tenant ||--o{ Customer : "拥有客户"
+    Tenant ||--o{ Message : "隔离字段"
+    Tenant ||--o{ AiSuggestion : "隔离字段"
+    Tenant ||--o{ FollowUpTask : "隔离字段"
+    User ||--o{ Customer : "作为负责人"
+    User ||--o{ Message : "作为发送人"
+    Customer ||--|| CustomerState : "1:1 当前状态"
+    Customer ||--o{ Message : "聊天记录"
+    Customer ||--o{ AiSuggestion : "历次判断"
+    Customer ||--o{ FollowUpTask : "跟进任务"
+
+    Tenant {
+        string id PK
+        string slug UK "种子按它 upsert"
+        string name
+        string salesGoal
+        string tone
+        json rules "企业规则（可带 guard 规则码）"
+        json forbidden "明文禁止项"
+        json handoff "交接触发器 / 敏感词 / 金额阈值"
+    }
+
+    User {
+        string id PK
+        string tenantId FK
+        string email UK
+        string name
+        string passwordHash "scrypt"
+        enum role "SALES | MANAGER"
+    }
+
+    Customer {
+        string id PK
+        string tenantId FK
+        string handle "微信号"
+        string name
+        string phone
+        string source
+        string assigneeId FK "销售归属：SALES 只能看自己的"
+    }
+
+    Message {
+        string id PK
+        string tenantId FK
+        string customerId FK
+        enum role "CUSTOMER | SALES"
+        string content
+        string senderUserId FK "SALES 消息才有"
+        string batchId "连续消息合并"
+        string clientMessageId "幂等键"
+    }
+
+    CustomerState {
+        string id PK
+        string customerId FK_UK "一客户一状态"
+        enum leadStage "NEW→DISCOVERY→INTERESTED→HIGH_INTENT→WON/LOST"
+        string intent
+        bool needHuman "只升不降，只能人工解除"
+        string humanReason
+        datetime lastCustomerMessageAt "跟进扫描依据"
+        int followUpCount "客户回话时归零"
+        int version "乐观锁"
+    }
+
+    AiSuggestion {
+        string id PK
+        string tenantId FK
+        string customerId FK
+        string batchId "一批次一次判断"
+        string customerIntent "六个必需输出字段之一"
+        enum leadStage
+        string nextAction
+        string reply "建议回复"
+        string reason "判断依据"
+        bool needHuman
+        json rulesApplied "模型自述引用了哪几条规则"
+        json stateAdjustments "系统改写了什么"
+        json handoffNotes "为什么升级人工"
+        string ruleViolation "规则守护发现的违规"
+        enum status "SUCCESS | RETRY_OK | FALLBACK | ERROR"
+        string trigger "NEW_MESSAGE | REGENERATE | FOLLOW_UP | INITIAL_BACKFILL"
+        json rawRequest "送进模型的原文（可回放）"
+        json rawResponse "模型原始输出"
+        json pipelineTrace "分段耗时 + 每步输入输出"
+        int latencyMs "模型真实耗时（响应体读完才计时）"
+        int promptTokens
+        int completionTokens
+        string sentMessageId FK "销售实际发出的消息"
+        string finalReply "与 reply 不同即说明人工改过"
+    }
+
+    FollowUpTask {
+        string id PK
+        string tenantId FK
+        string customerId FK
+        int attempt "幂等键（单调递增）"
+        enum status "PENDING | SENT | SKIPPED | CANCELLED"
+        datetime dueAt
+        string reason
+        string suggestionId FK "生成出来的跟进建议"
+    }
+```
+
+## 7. 枚举取值（答辩常被问到）
+
+| 枚举 | 取值 | 说明 |
+|---|---|---|
+| `Role` | `SALES` / `MANAGER` | 销售只能看自己名下客户；主管可看全企业并改规则 |
+| `MessageRole` | `CUSTOMER` / `SALES` | 一轮判断里只有 CUSTOMER 消息进入新消息列表，销售消息进历史 |
+| `LeadStage` | `NEW` → `DISCOVERY` → `INTERESTED` → `HIGH_INTENT` → `WON` / `LOST` | **顺序化**的，所以"只能前进不能回退"能写成代码而不是靠模型自觉；后两个是终态，只能人工确认 |
+| `SuggestionStatus` | `SUCCESS` / `RETRY_OK` / `FALLBACK` / `ERROR` | 描述**这次调用本身的健康度**，不是"判断对不对" |
+| `FollowUpStatus` | `PENDING` / `SENT` / `SKIPPED` / `CANCELLED` | 跟进任务状态 |
+| `customer_intent`（字符串枚举，非 DB enum） | 了解产品 / 询价 / 预约 / 犹豫 / 投诉 / 购买 / 售后 / **拒绝** / 其他 | 定义在 `src/lib/types.ts`；`拒绝` 是 M12 补的（客户明确表示不继续） |
+| `human_reason` | 客户投诉 / 客户明确要求真人 / AI 无法确认答案 / 高价值成交信号 / 触发租户规则红线 / AI 输出异常降级 / **客户流失倾向** / **成交待确认** / 其他 | 决定销售看到的第一句话，也决定 `REASON_TO_TRIGGER` 映射到哪个企业可关的触发器 |
+
+> 为什么这些枚举放在代码里而不是数据库 enum：它们要**同时**出现在 prompt 示例、zod 校验和
+> TypeScript 类型里（一份 schema 三处复用）。放进 DB enum 反而会让"改一个取值"变成一次迁移。
+
+## 8. 一个已知缺口（主动交代）
 
 **`Customer` 只有 `(tenantId, assigneeId)` 与 `(tenantId, updatedAt)` 索引，没有 `(tenantId, handle)` 唯一索引。**
 
