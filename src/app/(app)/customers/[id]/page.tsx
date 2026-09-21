@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AiSuggestionCard } from '@/components/ai-suggestion-card';
 import { NeedHumanBadge, StageBadge } from '@/components/stage-badge';
-import { countBatchMessages } from '@/lib/agent/batch';
+import { countBatchMessages, ensureInitialJudgment } from '@/lib/agent/batch';
 import { explainFollowUp } from '@/lib/agent/followup';
 import { HttpError } from '@/lib/errors';
 import { formatRelative } from '@/lib/format';
@@ -31,6 +31,18 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     // 必须原样抛出显示为错误页，否则会把真实故障伪装成"客户不存在"，排障时被误导
     if (error instanceof HttpError && error.status === 404) notFound();
     throw error;
+  }
+
+  /*
+   * 补跑"首次判断"：如果这个客户有客户消息却从未被判断过（种子数据、历史导入、迁移、
+   * 或进程在聚合窗口期间重启造成），就在这里补一次 —— 否则会出现"还没有 AI 判断"与
+   * 跟进区块"建议主动跟进"自相矛盾的画面。已经有判断时这个调用是零成本的（一次查询后直接返回）。
+   */
+  try {
+    await ensureInitialJudgment({ tenantId: ctx.tenantId, customerId: customer.id });
+  } catch (error) {
+    // 补跑失败不能连累页面渲染：消息仍在，判断只是缺失，用户也可以点「重新生成」手动触发
+    console.error('[customer-detail] 首次判断补跑失败', error);
   }
 
   const [messages, latestSuggestion, tenantConfig, followUpDecision] = await Promise.all([

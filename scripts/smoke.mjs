@@ -859,6 +859,40 @@ if (seedToken) {
     if (after.status === 200 && count > 0) {
       ok('冒烟结束后演示数据自动恢复干净', '无需再手工执行 db:seed');
     }
+
+    /*
+     * 补跑「首次判断」：
+     * 种子数据是直接写库的，绕过了入口 pipeline，所以演示客户一开始都没有 AI 判断。
+     * 打开客户详情页时系统应当自动补上 —— 否则页面会同时出现"还没有 AI 判断"
+     * 与"客户已静默 N 分钟，建议主动跟进"这种自相矛盾的状态。
+     */
+    const freshList = await fetch(`${baseUrl}/api/customers`, { headers: { cookie } }).then((r) => r.json());
+    const zhangs = (freshList.customers ?? []).find((c) => c.handle === 'zhang_nvshi');
+
+    if (zhangs) {
+      const before = await fetch(`${baseUrl}/api/customers/${zhangs.id}/suggestion`, {
+        headers: { cookie },
+      }).then((r) => r.json());
+
+      // 打开详情页（这一步会触发补跑）
+      await fetch(`${baseUrl}/customers/${zhangs.id}`, { headers: { cookie } });
+
+      const afterJudgment = await fetch(`${baseUrl}/api/customers/${zhangs.id}/suggestion`, {
+        headers: { cookie },
+      }).then((r) => r.json());
+
+      if (before.suggestion === null && afterJudgment.suggestion !== null) {
+        ok(
+          '打开详情页会补跑首次判断',
+          `从未判断 → ${afterJudgment.suggestion.customerIntent} / ${afterJudgment.suggestion.leadStage}`,
+        );
+      } else {
+        fail(
+          '首次判断补跑未生效',
+          `打开前=${before.suggestion ? '已有' : '无'}，打开后=${afterJudgment.suggestion ? '有' : '无'}`,
+        );
+      }
+    }
   }
 } else {
   console.log('\n会话与数据重置的一致性');
@@ -866,8 +900,11 @@ if (seedToken) {
 }
 
 console.log(`\n[smoke] 通过 ${passed} 项，失败 ${failed} 项`);
-if (failed === 0 && /127\.0\.0\.1|localhost/.test(baseUrl)) {
-  console.log('[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。演示前执行 `pnpm db:seed` 可重置演示数据（该客户也会被清除）。');
+if (failed === 0 && !seedToken) {
+  console.log(
+    '[smoke] 提示：本脚本会在「冒烟测试客户」上累积测试消息。' +
+      '传入 --seed-token=<口令> 可在脚本结束时自动把演示数据恢复干净。',
+  );
 }
 console.log('');
 process.exit(failed === 0 ? 0 : 1);

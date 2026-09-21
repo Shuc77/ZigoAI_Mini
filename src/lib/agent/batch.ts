@@ -196,3 +196,45 @@ export async function sweepExpiredBatches(limit = 20): Promise<Array<{ batchId: 
 export async function countBatchMessages(tenantId: string, batchId: string): Promise<number> {
   return prisma.message.count({ where: { tenantId, batchId, role: 'CUSTOMER' } });
 }
+
+/**
+ * 补跑「首次判断」：若该客户有客户消息、但**从未产生过任何 AI 判断**，就补跑一次。
+ *
+ * 为什么需要它（一个真实的体验缺口）：
+ * 消息并非都从入口进来 —— 种子数据（演示数据直接写库）、历史会话导入、数据迁移，
+ * 或者进程在聚合窗口期间重启，都会留下"有客户消息但没有判断"的客户。
+ * 表现是打开客户详情页看到「还没有 AI 判断」，而旁边的跟进区块却说「客户已静默 N 分钟，
+ * 建议主动跟进」—— 两个区块自相矛盾，看起来像系统没工作。
+ *
+ * 语义上这和 `sweepExpiredBatches` 是同一类：**入口漏掉的消息，系统必须能自己补上**。
+ *
+ * 幂等：已有任何判断 → 直接返回；没有未归批的客户消息 → 直接返回；
+ * 归批后交给 `processBatch`，它自身也会再检查一次"该批次是否已有建议"。
+ */
+export async function ensureInitialJudgment(params: {
+  tenantId: string;
+  customerId: string;
+}): Promise<{ triggered: boolean; messageCount: number }> {
+  const existing = await prisma.aiSuggestion.findFirst({
+    where: { tenantId: params.tenantId, customerId: params.customerId },
+    select: { id: true },
+  });
+  if (existing) return { triggered: false, messageCount: 0 };
+
+  const unbatched = await prisma.message.findMany({
+    where: { tenantId: params.tenantId, customerId: params.customerId, role: 'CUSTOMER', batchId: null },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
+  });
+  if (unbatched.length === 0) return { triggered: false, messageCount: 0 };
+
+  // 把这些"从没被判断过"的消息归到同一批（它们本来就是一轮沟通）
+  const batchId = randomUUID();
+  await prisma.message.updateMany({
+    where: { id: { in: unbatched.map((message) => message.id) } },
+    data: { batchId },
+  });
+
+  const result = await processBatch(batchId, params.tenantId, params.customerId);
+  return { triggered: result.processed, messageCount: result.messageCount };
+}
