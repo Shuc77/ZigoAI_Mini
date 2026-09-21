@@ -227,6 +227,15 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
             actions={
               latestSuggestion ? (
                 <SuggestionActions
+                  /*
+                   * key 必须带上建议 id（真实踩到的坑）：
+                   * 这个组件内部用 useState 保存"销售正在编辑的文本"，初值取自 AI 建议。
+                   * 而 router.refresh() 之后组件在树里的位置没变 —— React 会复用实例、**保留旧 state**，
+                   * 于是新一轮判断出来时，发送框里还停着**上一轮**的建议（客户已经收到的那个），
+                   * 销售一不留神就会把上一条重发一遍。
+                   * 用 key 让它在"建议换了"时重新挂载，state 自然会用新建议初始化。
+                   */
+                  key={latestSuggestion.id}
                   suggestionId={latestSuggestion.id}
                   originalReply={latestSuggestion.reply}
                   alreadySent={latestSuggestion.sentMessageId !== null}

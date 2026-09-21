@@ -156,7 +156,10 @@ export function AiSuggestionCard({
               </span>
             ) : null}
           </div>
-          <div className="prewrap rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2.5 text-[15px] leading-relaxed text-slate-900">
+          <div
+            data-testid="suggestion-reply-text"
+            className="prewrap rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2.5 text-[15px] leading-relaxed text-slate-900"
+          >
             {suggestion.reply}
           </div>
         </div>

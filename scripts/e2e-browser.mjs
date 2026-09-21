@@ -246,6 +246,48 @@ try {
   await page.getByTestId('chat-messages').getByText(sentText).waitFor({ timeout: 30_000 });
   ok('刷新页面后数据仍在（已持久化）');
 
+  /*
+   * ---- 8.5 新一轮判断出来后，发送框必须换成**新**建议 ----
+   *
+   * 真实 bug：发送框用 useState 保存销售正在编辑的文本，初值取自 AI 建议。
+   * router.refresh() 之后组件位置没变，React 复用实例、保留旧 state ——
+   * 于是新一轮判断出来时，框里还停着**上一轮**（客户已经收到）的那句话，
+   * 销售一不留神就把上一条重发一遍。
+   */
+  const replyBefore = ((await page.getByTestId('suggestion-reply-text').textContent()) ?? '').trim();
+
+  await page.getByTestId('customer-composer').fill(`${marker}：我又回来了，还是想问下价格`);
+  const secondPost = await clickAndAwaitPost('customer-send', '/messages');
+  if (secondPost.status() !== 201) fail('第二条消息提交失败', `HTTP ${secondPost.status()}`);
+
+  try {
+    // 等"建议回复"区域的内容真的变了（新判断落库并自动刷新）
+    await page
+      .locator(`[data-testid="suggestion-reply-text"]:not(:text-is("${replyBefore.replace(/"/g, '\\"')}"))`)
+      .first()
+      .waitFor({ timeout: 120_000 })
+      .catch(async () => {
+        // 文本完全相同的概率极低；退一步，等发送框与展示的建议重新对齐
+        await page.waitForTimeout(3000);
+      });
+
+    const replyAfter = ((await page.getByTestId('suggestion-reply-text').textContent()) ?? '').trim();
+    const boxValue = await page.getByTestId('suggestion-reply').inputValue();
+
+    if (replyAfter !== replyBefore && boxValue.trim() === replyAfter) {
+      ok('新一轮判断后发送框自动换成新建议', `旧：「${replyBefore.slice(0, 18)}…」→ 新：「${replyAfter.slice(0, 18)}…」`);
+    } else if (replyAfter === replyBefore) {
+      fail('第二轮判断没有产生新建议', '两轮建议文本相同，无法验证发送框是否刷新');
+    } else {
+      fail(
+        '发送框仍停留在上一轮建议',
+        `展示的是「${replyAfter.slice(0, 24)}…」，框里却是「${boxValue.slice(0, 24)}…」`,
+      );
+    }
+  } catch (error) {
+    fail('发送框刷新检查失败', String(error.message ?? error).split('\n')[0]);
+  }
+
   // ---- 9. 客户端零异常 ----
   if (httpErrors.length === 0) {
     ok('无 4xx / 5xx 请求', '静态资源与接口全部正常');
