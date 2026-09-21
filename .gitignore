@@ -32,3 +32,6 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
+
+# 浏览器端到端测试失败时的截图（一次性调试产物，不入库）
+e2e-failure.png
